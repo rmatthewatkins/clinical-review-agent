@@ -1,11 +1,10 @@
 """Cohort-level analytics for completed readmission reviews.
 
-Reads reviews from SQLite, computes aggregate metrics, generates
+Reads reviews from PostgreSQL, computes aggregate metrics, generates
 matplotlib visualizations, and writes a summary JSON report.
 """
 
 import json
-import sqlite3
 from collections import Counter
 from pathlib import Path
 
@@ -22,7 +21,7 @@ OUTPUT_DIR = Path(__file__).parent.parent.parent / "output" / "analytics"
 # Query helpers
 # ---------------------------------------------------------------------------
 
-def _fetch_reviews(conn: sqlite3.Connection) -> list[dict]:
+def _fetch_reviews(conn) -> list[dict]:
     """Return all reviews with their parsed structured_json."""
     rows = conn.execute(
         "SELECT id, pair_id, structured_json, clinical_narrative, "
@@ -39,14 +38,14 @@ def _fetch_reviews(conn: sqlite3.Connection) -> list[dict]:
     return results
 
 
-def _fetch_diagnosis_for_pair(conn: sqlite3.Connection, pair_id: int) -> str | None:
+def _fetch_diagnosis_for_pair(conn, pair_id: int) -> str | None:
     """Get the primary diagnosis display for the index encounter of a pair."""
     row = conn.execute(
         """
         SELECT c.display
         FROM readmission_pairs rp
         JOIN conditions c ON c.encounter_id = rp.index_encounter_id
-        WHERE rp.id = ?
+        WHERE rp.id = %s
         ORDER BY c.onset ASC
         LIMIT 1
         """,
@@ -73,7 +72,7 @@ def root_cause_distribution(reviews: list[dict]) -> dict[str, dict]:
 
 
 def mean_preventability_by_diagnosis(
-    conn: sqlite3.Connection, reviews: list[dict]
+    conn, reviews: list[dict]
 ) -> dict[str, float]:
     """Mean preventability_score grouped by primary diagnosis of the index encounter."""
     diag_scores: dict[str, list[float]] = {}
@@ -260,13 +259,13 @@ def build_summary(
 # Entrypoint
 # ---------------------------------------------------------------------------
 
-def run_analyze(db_path: str | Path | None = None, output_dir: Path | None = None) -> None:
+def run_analyze(database_url: str | Path | None = None, output_dir: Path | None = None) -> None:
     """Run all analytics, generate visualizations, write summary JSON, print console table."""
     from rich.console import Console
     from rich.table import Table
 
     console = Console()
-    conn = get_connection(db_path)
+    conn = get_connection(database_url)
     out = output_dir or OUTPUT_DIR
     out.mkdir(parents=True, exist_ok=True)
 

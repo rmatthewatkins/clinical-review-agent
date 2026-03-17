@@ -1,7 +1,6 @@
 """Tests for the readmission review agent: context assembly and response parsing."""
 
 import json
-import sqlite3
 from datetime import date
 
 import pytest
@@ -15,113 +14,113 @@ from src.schema import get_connection
 
 
 @pytest.fixture
-def db():
-    """Create an in-memory SQLite database with schema and sample data."""
-    conn = get_connection(":memory:")
+def db(db_conn):
+    """Use the shared db_conn fixture and populate with sample data."""
+    conn = db_conn
 
     # Insert a patient
     conn.execute(
         "INSERT INTO patients (id, birth_date, gender, race, ethnicity, city, state) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
         ("P001", "1955-06-15", "M", "white", "nonhispanic", "Springfield", "IL"),
     )
 
     # Insert index encounter
     conn.execute(
-        "INSERT INTO encounters (id, patient_id, type, start, end, reason_code, reason_display, discharge_disposition) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        """INSERT INTO encounters (id, patient_id, type, start, "end", reason_code, reason_display, discharge_disposition) """
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
         ("E001", "P001", "inpatient", "2025-01-10", "2025-01-14", "I50.9", "Heart failure, unspecified", "home"),
     )
 
     # Insert readmission encounter
     conn.execute(
-        "INSERT INTO encounters (id, patient_id, type, start, end, reason_code, reason_display, discharge_disposition) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        """INSERT INTO encounters (id, patient_id, type, start, "end", reason_code, reason_display, discharge_disposition) """
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
         ("E003", "P001", "inpatient", "2025-01-28", "2025-02-02", "I50.9", "Heart failure, unspecified", "home"),
     )
 
     # Insert an interval encounter (outpatient visit between)
     conn.execute(
-        "INSERT INTO encounters (id, patient_id, type, start, end, reason_code, reason_display, discharge_disposition) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        """INSERT INTO encounters (id, patient_id, type, start, "end", reason_code, reason_display, discharge_disposition) """
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
         ("E002", "P001", "outpatient", "2025-01-20", "2025-01-20", "Z00.0", "Follow-up visit", None),
     )
 
     # Index encounter diagnoses
     conn.execute(
         "INSERT INTO conditions (id, patient_id, encounter_id, code, display, onset, abatement, clinical_status) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
         ("C001", "P001", "E001", "I50.9", "Heart failure", "2025-01-10", None, "active"),
     )
     conn.execute(
         "INSERT INTO conditions (id, patient_id, encounter_id, code, display, onset, abatement, clinical_status) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
         ("C002", "P001", "E001", "I10", "Essential hypertension", "2020-03-01", None, "active"),
     )
 
     # Readmission diagnoses
     conn.execute(
         "INSERT INTO conditions (id, patient_id, encounter_id, code, display, onset, abatement, clinical_status) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
         ("C003", "P001", "E003", "I50.9", "Heart failure exacerbation", "2025-01-28", None, "active"),
     )
 
     # A new condition in the interval
     conn.execute(
         "INSERT INTO conditions (id, patient_id, encounter_id, code, display, onset, abatement, clinical_status) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
         ("C004", "P001", "E002", "E11.9", "Type 2 diabetes", "2025-01-20", None, "active"),
     )
 
     # Index encounter medications
     conn.execute(
-        "INSERT INTO medications (id, patient_id, encounter_id, code, display, start, end, status) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        """INSERT INTO medications (id, patient_id, encounter_id, code, display, start, "end", status) """
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
         ("M001", "P001", "E001", "197361", "Furosemide 40mg", "2025-01-10", None, "active"),
     )
     conn.execute(
-        "INSERT INTO medications (id, patient_id, encounter_id, code, display, start, end, status) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        """INSERT INTO medications (id, patient_id, encounter_id, code, display, start, "end", status) """
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
         ("M002", "P001", "E001", "29046", "Lisinopril 10mg", "2025-01-10", None, "active"),
     )
 
     # A new medication started in the interval
     conn.execute(
-        "INSERT INTO medications (id, patient_id, encounter_id, code, display, start, end, status) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        """INSERT INTO medications (id, patient_id, encounter_id, code, display, start, "end", status) """
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
         ("M003", "P001", "E002", "860975", "Metformin 500mg", "2025-01-20", None, "active"),
     )
 
     # Index encounter procedures
     conn.execute(
         "INSERT INTO procedures (id, patient_id, encounter_id, code, display, date) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
+        "VALUES (%s, %s, %s, %s, %s, %s)",
         ("PR001", "P001", "E001", "93306", "Echocardiogram", "2025-01-11"),
     )
 
     # Index encounter observations
     conn.execute(
         "INSERT INTO observations (id, patient_id, encounter_id, code, display, value, unit, date) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
         ("O001", "P001", "E001", "85354-9", "Blood pressure systolic", "158", "mmHg", "2025-01-10"),
     )
     conn.execute(
         "INSERT INTO observations (id, patient_id, encounter_id, code, display, value, unit, date) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
         ("O002", "P001", "E001", "39156-5", "BMI", "32.1", "kg/m2", "2025-01-10"),
     )
 
     # Readmission observations
     conn.execute(
         "INSERT INTO observations (id, patient_id, encounter_id, code, display, value, unit, date) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
         ("O003", "P001", "E003", "85354-9", "Blood pressure systolic", "172", "mmHg", "2025-01-28"),
     )
 
     # Readmission pair
     conn.execute(
         "INSERT INTO readmission_pairs (id, index_encounter_id, readmission_encounter_id, days_between, patient_id) "
-        "VALUES (?, ?, ?, ?, ?)",
+        "VALUES (%s, %s, %s, %s, %s)",
         (1, "E001", "E003", 14, "P001"),
     )
 

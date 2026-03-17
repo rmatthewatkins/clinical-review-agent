@@ -1,19 +1,18 @@
 """Context assembler for readmission pair clinical review.
 
-Given a readmission_pair row, queries the SQLite database and assembles
+Given a readmission_pair row, queries the PostgreSQL database and assembles
 a comprehensive clinical context dict for LLM-based peer review.
 """
 
 from __future__ import annotations
 
 import json
-import sqlite3
 from datetime import date, datetime
 from typing import Any
 
 
-def _rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
-    """Convert sqlite3.Row objects to plain dicts."""
+def _rows_to_dicts(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Ensure rows are plain dicts (no-op with psycopg dict_row, but safe)."""
     return [dict(r) for r in rows]
 
 
@@ -36,16 +35,16 @@ def _compute_age(birth_date_str: str | None, reference_date_str: str | None = No
     return age
 
 
-def assemble_context(pair: dict[str, Any] | sqlite3.Row, conn: sqlite3.Connection) -> dict[str, Any]:
+def assemble_context(pair: dict[str, Any], conn) -> dict[str, Any]:
     """Assemble a full clinical context dict for a readmission pair.
 
     Parameters
     ----------
-    pair : dict or sqlite3.Row
+    pair : dict
         A row from readmission_pairs with keys: id, index_encounter_id,
         readmission_encounter_id, days_between, patient_id.
-    conn : sqlite3.Connection
-        Database connection (must have row_factory = sqlite3.Row).
+    conn : psycopg.Connection
+        Database connection (must use dict_row factory).
 
     Returns
     -------
@@ -59,16 +58,16 @@ def assemble_context(pair: dict[str, Any] | sqlite3.Row, conn: sqlite3.Connectio
     cur = conn.cursor()
 
     # ── Patient baseline ────────────────────────────────────────────────
-    cur.execute("SELECT * FROM patients WHERE id = ?", (patient_id,))
+    cur.execute("SELECT * FROM patients WHERE id = %s", (patient_id,))
     patient_row = cur.fetchone()
     patient = dict(patient_row) if patient_row else {}
 
     # Index encounter (need dates for age calc and interval)
-    cur.execute("SELECT * FROM encounters WHERE id = ?", (index_enc_id,))
+    cur.execute("SELECT * FROM encounters WHERE id = %s", (index_enc_id,))
     index_enc = dict(cur.fetchone() or {})
 
     # Readmission encounter
-    cur.execute("SELECT * FROM encounters WHERE id = ?", (readmit_enc_id,))
+    cur.execute("SELECT * FROM encounters WHERE id = %s", (readmit_enc_id,))
     readmit_enc = dict(cur.fetchone() or {})
 
     index_start = index_enc.get("start")
@@ -81,7 +80,7 @@ def assemble_context(pair: dict[str, Any] | sqlite3.Row, conn: sqlite3.Connectio
     cur.execute(
         """SELECT DISTINCT code, display, onset, clinical_status
            FROM conditions
-           WHERE patient_id = ?
+           WHERE patient_id = %s
              AND (abatement IS NULL OR abatement = '' OR clinical_status = 'active')
            ORDER BY onset""",
         (patient_id,),
@@ -90,10 +89,10 @@ def assemble_context(pair: dict[str, Any] | sqlite3.Row, conn: sqlite3.Connectio
 
     # Active medications at time of index admission
     cur.execute(
-        """SELECT DISTINCT code, display, start, end, status
+        """SELECT DISTINCT code, display, start, "end", status
            FROM medications
-           WHERE patient_id = ?
-             AND (status = 'active' OR end IS NULL OR end = '' OR end >= ?)
+           WHERE patient_id = %s
+             AND (status = 'active' OR "end" IS NULL OR "end" = '' OR "end" >= %s)
            ORDER BY start""",
         (patient_id, index_start or ""),
     )
@@ -103,8 +102,8 @@ def assemble_context(pair: dict[str, Any] | sqlite3.Row, conn: sqlite3.Connectio
     cur.execute(
         """SELECT display, value, unit, date
            FROM observations
-           WHERE patient_id = ?
-             AND date <= ?
+           WHERE patient_id = %s
+             AND date <= %s
            ORDER BY date DESC
            LIMIT 50""",
         (patient_id, index_start or "9999-12-31"),
@@ -137,28 +136,28 @@ def assemble_context(pair: dict[str, Any] | sqlite3.Row, conn: sqlite3.Connectio
 
     # Diagnoses during index encounter
     cur.execute(
-        "SELECT code, display, onset, clinical_status FROM conditions WHERE encounter_id = ? ORDER BY onset",
+        "SELECT code, display, onset, clinical_status FROM conditions WHERE encounter_id = %s ORDER BY onset",
         (index_enc_id,),
     )
     index_diagnoses = _rows_to_dicts(cur.fetchall())
 
     # Procedures during index encounter
     cur.execute(
-        "SELECT code, display, date FROM procedures WHERE encounter_id = ? ORDER BY date",
+        "SELECT code, display, date FROM procedures WHERE encounter_id = %s ORDER BY date",
         (index_enc_id,),
     )
     index_procedures = _rows_to_dicts(cur.fetchall())
 
     # Medications prescribed during index encounter
     cur.execute(
-        "SELECT code, display, start, end, status FROM medications WHERE encounter_id = ? ORDER BY start",
+        """SELECT code, display, start, "end", status FROM medications WHERE encounter_id = %s ORDER BY start""",
         (index_enc_id,),
     )
     index_medications = _rows_to_dicts(cur.fetchall())
 
     # Observations during index encounter
     cur.execute(
-        "SELECT display, value, unit, date FROM observations WHERE encounter_id = ? ORDER BY date",
+        "SELECT display, value, unit, date FROM observations WHERE encounter_id = %s ORDER BY date",
         (index_enc_id,),
     )
     index_observations = _rows_to_dicts(cur.fetchall())
@@ -184,9 +183,9 @@ def assemble_context(pair: dict[str, Any] | sqlite3.Row, conn: sqlite3.Connectio
     if index_end and readmit_start:
         cur.execute(
             """SELECT * FROM encounters
-               WHERE patient_id = ?
-                 AND id != ? AND id != ?
-                 AND start >= ? AND start < ?
+               WHERE patient_id = %s
+                 AND id != %s AND id != %s
+                 AND start >= %s AND start < %s
                ORDER BY start""",
             (patient_id, index_enc_id, readmit_enc_id, index_end, readmit_start),
         )
@@ -197,22 +196,22 @@ def assemble_context(pair: dict[str, Any] | sqlite3.Row, conn: sqlite3.Connectio
     stopped_meds: list[dict] = []
     if index_end and readmit_start:
         cur.execute(
-            """SELECT code, display, start, end, status
+            """SELECT code, display, start, "end", status
                FROM medications
-               WHERE patient_id = ?
-                 AND start >= ? AND start < ?
+               WHERE patient_id = %s
+                 AND start >= %s AND start < %s
                ORDER BY start""",
             (patient_id, index_end, readmit_start),
         )
         new_meds_started = _rows_to_dicts(cur.fetchall())
 
         cur.execute(
-            """SELECT code, display, start, end, status
+            """SELECT code, display, start, "end", status
                FROM medications
-               WHERE patient_id = ?
-                 AND end >= ? AND end < ?
+               WHERE patient_id = %s
+                 AND "end" >= %s AND "end" < %s
                  AND (status = 'stopped' OR status = 'completed')
-               ORDER BY end""",
+               ORDER BY "end" """,
             (patient_id, index_end, readmit_start),
         )
         stopped_meds = _rows_to_dicts(cur.fetchall())
@@ -223,8 +222,8 @@ def assemble_context(pair: dict[str, Any] | sqlite3.Row, conn: sqlite3.Connectio
         cur.execute(
             """SELECT code, display, onset, clinical_status
                FROM conditions
-               WHERE patient_id = ?
-                 AND onset >= ? AND onset < ?
+               WHERE patient_id = %s
+                 AND onset >= %s AND onset < %s
                ORDER BY onset""",
             (patient_id, index_end, readmit_start),
         )
@@ -239,13 +238,13 @@ def assemble_context(pair: dict[str, Any] | sqlite3.Row, conn: sqlite3.Connectio
 
     # ── Readmission ─────────────────────────────────────────────────────
     cur.execute(
-        "SELECT code, display, onset, clinical_status FROM conditions WHERE encounter_id = ? ORDER BY onset",
+        "SELECT code, display, onset, clinical_status FROM conditions WHERE encounter_id = %s ORDER BY onset",
         (readmit_enc_id,),
     )
     readmit_diagnoses = _rows_to_dicts(cur.fetchall())
 
     cur.execute(
-        "SELECT display, value, unit, date FROM observations WHERE encounter_id = ? ORDER BY date",
+        "SELECT display, value, unit, date FROM observations WHERE encounter_id = %s ORDER BY date",
         (readmit_enc_id,),
     )
     readmit_observations = _rows_to_dicts(cur.fetchall())

@@ -14,7 +14,7 @@ def ingest(
     fhir_url: str = typer.Option(None, "--fhir-url", "-u", help="FHIR R4 server base URL (e.g., http://localhost:8080/fhir)"),
     token: str = typer.Option(None, "--token", "-t", envvar="FHIR_TOKEN", help="Bearer token for FHIR API auth"),
 ):
-    """Ingest FHIR data into SQLite from files or a FHIR server."""
+    """Ingest FHIR data into PostgreSQL from files or a FHIR server."""
     from src.data.ingest import run_ingest
 
     if source_dir and fhir_url:

@@ -129,12 +129,14 @@ CAREPLAN_RESOURCE = {
 
 
 @pytest.fixture()
-def _use_tmp_db(tmp_path, monkeypatch):
-    """Redirect all DB access to a temp database."""
-    db_path = tmp_path / "test.db"
-    import src.schema as schema_mod
-    monkeypatch.setattr(schema_mod, "DEFAULT_DB_PATH", db_path)
-    return db_path
+def _clean_db():
+    """Ensure a clean database for each test."""
+    from src.schema import get_connection, ALL_TABLES
+    conn = get_connection()
+    for table in ALL_TABLES:
+        conn.execute(f"TRUNCATE {table} CASCADE")
+    conn.commit()
+    conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +144,7 @@ def _use_tmp_db(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 class TestIngest:
-    def test_full_ingest(self, _use_tmp_db, tmp_path):
+    def test_full_ingest(self, _clean_db, tmp_path):
         """Ingest a bundle with every resource type and verify all tables populated."""
         bundle = _make_bundle([
             PATIENT_RESOURCE,
@@ -178,10 +180,10 @@ class TestIngest:
         assert row["discharge_disposition"] == "Home"
 
         # Condition
-        assert conn.execute("SELECT count(*) FROM conditions").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) AS cnt FROM conditions").fetchone()["cnt"] == 1
 
         # Medication
-        assert conn.execute("SELECT count(*) FROM medications").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) AS cnt FROM medications").fetchone()["cnt"] == 1
 
         # Observation
         row = conn.execute("SELECT * FROM observations WHERE id='obs-1'").fetchone()
@@ -189,14 +191,14 @@ class TestIngest:
         assert row["unit"] == "mmHg"
 
         # Procedure
-        assert conn.execute("SELECT count(*) FROM procedures").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) AS cnt FROM procedures").fetchone()["cnt"] == 1
 
         # CarePlan
-        assert conn.execute("SELECT count(*) FROM care_plans").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) AS cnt FROM care_plans").fetchone()["cnt"] == 1
 
         conn.close()
 
-    def test_idempotent(self, _use_tmp_db, tmp_path):
+    def test_idempotent(self, _clean_db, tmp_path):
         """Running ingest twice should not duplicate rows."""
         bundle = _make_bundle([PATIENT_RESOURCE])
         bundle_dir = tmp_path / "fhir"
@@ -208,7 +210,7 @@ class TestIngest:
         run_ingest(str(bundle_dir))
 
         conn = get_connection()
-        assert conn.execute("SELECT count(*) FROM patients").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) AS cnt FROM patients").fetchone()["cnt"] == 1
         conn.close()
 
 
@@ -217,7 +219,7 @@ class TestIngest:
 # ---------------------------------------------------------------------------
 
 class TestPairs:
-    def _setup_encounters(self, _use_tmp_db, encounters: list[dict]):
+    def _setup_encounters(self, encounters: list[dict]):
         """Insert patient + encounters directly, then run pair identification."""
         bundle = _make_bundle([PATIENT_RESOURCE] + encounters)
         bundle_dir = Path(tempfile.mkdtemp())
@@ -229,13 +231,13 @@ class TestPairs:
         from src.data.pairs import run_identify_pairs
         run_identify_pairs()
 
-    def test_readmission_within_30_days(self, _use_tmp_db, tmp_path):
+    def test_readmission_within_30_days(self, _clean_db, tmp_path):
         """Two inpatient encounters 10 days apart should be a pair."""
         encs = [
             _enc("enc-a", "2025-01-01T00:00:00Z", "2025-01-05T00:00:00Z"),
             _enc("enc-b", "2025-01-10T00:00:00Z", "2025-01-15T00:00:00Z"),
         ]
-        self._setup_encounters(_use_tmp_db, encs)
+        self._setup_encounters(encs)
 
         conn = get_connection()
         pairs = conn.execute("SELECT * FROM readmission_pairs").fetchall()
@@ -245,13 +247,13 @@ class TestPairs:
         assert pairs[0]["days_between"] == 5  # Jan 5 -> Jan 10
         conn.close()
 
-    def test_exactly_30_days_included(self, _use_tmp_db, tmp_path):
+    def test_exactly_30_days_included(self, _clean_db, tmp_path):
         """Encounter exactly 30 days after discharge should be included."""
         encs = [
             _enc("enc-a", "2025-01-01T00:00:00Z", "2025-01-05T00:00:00Z"),
             _enc("enc-b", "2025-02-04T00:00:00Z", "2025-02-10T00:00:00Z"),  # 30 days after Jan 5
         ]
-        self._setup_encounters(_use_tmp_db, encs)
+        self._setup_encounters(encs)
 
         conn = get_connection()
         pairs = conn.execute("SELECT * FROM readmission_pairs").fetchall()
@@ -259,39 +261,39 @@ class TestPairs:
         assert pairs[0]["days_between"] == 30
         conn.close()
 
-    def test_31_days_excluded(self, _use_tmp_db, tmp_path):
+    def test_31_days_excluded(self, _clean_db, tmp_path):
         """Encounter 31 days after discharge should NOT be paired."""
         encs = [
             _enc("enc-a", "2025-01-01T00:00:00Z", "2025-01-05T00:00:00Z"),
             _enc("enc-b", "2025-02-05T00:00:00Z", "2025-02-10T00:00:00Z"),  # 31 days after Jan 5
         ]
-        self._setup_encounters(_use_tmp_db, encs)
+        self._setup_encounters(encs)
 
         conn = get_connection()
         pairs = conn.execute("SELECT * FROM readmission_pairs").fetchall()
         assert len(pairs) == 0
         conn.close()
 
-    def test_ambulatory_excluded(self, _use_tmp_db, tmp_path):
+    def test_ambulatory_excluded(self, _clean_db, tmp_path):
         """Ambulatory encounters should not form readmission pairs."""
         encs = [
             _enc("enc-a", "2025-01-01T00:00:00Z", "2025-01-05T00:00:00Z", class_code="AMB"),
             _enc("enc-b", "2025-01-10T00:00:00Z", "2025-01-15T00:00:00Z", class_code="AMB"),
         ]
-        self._setup_encounters(_use_tmp_db, encs)
+        self._setup_encounters(encs)
 
         conn = get_connection()
         pairs = conn.execute("SELECT * FROM readmission_pairs").fetchall()
         assert len(pairs) == 0
         conn.close()
 
-    def test_idempotent_pairs(self, _use_tmp_db, tmp_path):
+    def test_idempotent_pairs(self, _clean_db, tmp_path):
         """Running identify_pairs twice should not duplicate pairs."""
         encs = [
             _enc("enc-a", "2025-01-01T00:00:00Z", "2025-01-05T00:00:00Z"),
             _enc("enc-b", "2025-01-10T00:00:00Z", "2025-01-15T00:00:00Z"),
         ]
-        self._setup_encounters(_use_tmp_db, encs)
+        self._setup_encounters(encs)
 
         # Run again
         from src.data.pairs import run_identify_pairs

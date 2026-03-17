@@ -1,17 +1,16 @@
 """Tests for src/analytics/analyze.py.
 
-Uses an in-memory SQLite database populated with synthetic data that
+Uses a PostgreSQL database populated with synthetic data that
 mirrors the schema defined in src.schema.
 """
 
 import json
-import sqlite3
 import tempfile
 from pathlib import Path
 
 import pytest
 
-from src.schema import SCHEMA_SQL
+from src.schema import get_connection, SCHEMA_SQL, ALL_TABLES
 from src.analytics.analyze import (
     _fetch_reviews,
     root_cause_distribution,
@@ -109,15 +108,11 @@ DIAGNOSES = [
 ]
 
 
-def _make_db() -> sqlite3.Connection:
-    """Create an in-memory SQLite database with schema and synthetic data."""
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    conn.executescript(SCHEMA_SQL)
-
+def _populate_db(conn) -> None:
+    """Populate the database with synthetic test data."""
     # Insert patients
     conn.execute(
-        "INSERT INTO patients (id, birth_date, gender) VALUES (?, ?, ?)",
+        "INSERT INTO patients (id, birth_date, gender) VALUES (%s, %s, %s)",
         ("p1", "1950-01-01", "male"),
     )
 
@@ -126,29 +121,29 @@ def _make_db() -> sqlite3.Connection:
         index_enc_id = f"enc-index-{pair_id}"
         readm_enc_id = f"enc-readm-{pair_id}"
 
-        # Encounters (ignore duplicates for same pair_id via OR IGNORE)
+        # Encounters (ignore duplicates for same pair_id via ON CONFLICT)
         conn.execute(
-            "INSERT OR IGNORE INTO encounters (id, patient_id, type, start, end) "
-            "VALUES (?, 'p1', 'inpatient', '2025-01-01', '2025-01-05')",
+            """INSERT INTO encounters (id, patient_id, type, start, "end") """
+            "VALUES (%s, 'p1', 'inpatient', '2025-01-01', '2025-01-05') ON CONFLICT DO NOTHING",
             (index_enc_id,),
         )
         conn.execute(
-            "INSERT OR IGNORE INTO encounters (id, patient_id, type, start, end) "
-            "VALUES (?, 'p1', 'inpatient', '2025-01-20', '2025-01-25')",
+            """INSERT INTO encounters (id, patient_id, type, start, "end") """
+            "VALUES (%s, 'p1', 'inpatient', '2025-01-20', '2025-01-25') ON CONFLICT DO NOTHING",
             (readm_enc_id,),
         )
 
         # Readmission pair
         conn.execute(
-            "INSERT OR IGNORE INTO readmission_pairs (id, index_encounter_id, readmission_encounter_id, days_between, patient_id) "
-            "VALUES (?, ?, ?, 15, 'p1')",
+            "INSERT INTO readmission_pairs (id, index_encounter_id, readmission_encounter_id, days_between, patient_id) "
+            "VALUES (%s, %s, %s, 15, 'p1') ON CONFLICT DO NOTHING",
             (pair_id, index_enc_id, readm_enc_id),
         )
 
         # Condition on the index encounter
         conn.execute(
-            "INSERT OR IGNORE INTO conditions (id, patient_id, encounter_id, code, display, onset, clinical_status) "
-            "VALUES (?, 'p1', ?, ?, ?, '2025-01-01', 'active')",
+            "INSERT INTO conditions (id, patient_id, encounter_id, code, display, onset, clinical_status) "
+            "VALUES (%s, 'p1', %s, %s, %s, '2025-01-01', 'active') ON CONFLICT DO NOTHING",
             (f"cond-{pair_id}", index_enc_id, f"code-{pair_id}", diagnosis),
         )
 
@@ -164,19 +159,17 @@ def _make_db() -> sqlite3.Connection:
         })
         conn.execute(
             "INSERT INTO reviews (pair_id, structured_json, clinical_narrative, model_used, created_at, tokens_used) "
-            "VALUES (?, ?, 'narrative', 'test-model', '2025-02-01', 100)",
+            "VALUES (%s, %s, 'narrative', 'test-model', '2025-02-01', 100)",
             (pair_id, structured),
         )
 
     conn.commit()
-    return conn
 
 
 @pytest.fixture
-def db():
-    conn = _make_db()
-    yield conn
-    conn.close()
+def db(db_conn):
+    _populate_db(db_conn)
+    yield db_conn
 
 
 @pytest.fixture
@@ -331,30 +324,23 @@ class TestBuildSummary:
 
 
 class TestRunAnalyze:
-    def test_empty_reviews_graceful(self, capsys):
+    def test_empty_reviews_graceful(self, db_conn, capsys):
         """run_analyze should print a friendly message and return when no reviews exist."""
+        # db_conn is already clean (truncated), no reviews
         with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = Path(tmpdir) / "empty.db"
             out = Path(tmpdir) / "output"
             out.mkdir()
-            run_analyze(db_path=db_path, output_dir=out)
+            run_analyze(output_dir=out)
             captured = capsys.readouterr()
             assert "No completed reviews found" in captured.out
 
-    def test_full_run(self):
+    def test_full_run(self, db_conn):
         """run_analyze should produce all outputs when reviews exist."""
-        conn = _make_db()
+        _populate_db(db_conn)
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Write the in-memory DB to a file so run_analyze can open it
-            db_path = Path(tmpdir) / "test.db"
-            file_conn = sqlite3.connect(str(db_path))
-            conn.backup(file_conn)
-            file_conn.close()
-            conn.close()
-
             out = Path(tmpdir) / "output"
             out.mkdir()
-            run_analyze(db_path=db_path, output_dir=out)
+            run_analyze(output_dir=out)
 
             # Check all expected outputs
             assert (out / "summary.json").exists()

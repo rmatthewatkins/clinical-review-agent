@@ -1,7 +1,7 @@
-"""FHIR resource parser and SQLite loader.
+"""FHIR resource parser and PostgreSQL loader.
 
 Accepts any FhirSource (file-based, API, etc.) and normalizes FHIR resources
-into the shared SQLite schema.
+into the shared PostgreSQL schema.
 """
 
 import logging
@@ -253,7 +253,7 @@ _PLACEHOLDERS = {
 # ---------------------------------------------------------------------------
 
 def run_ingest(source: FhirSource | str) -> None:
-    """Parse FHIR resources from *source* into SQLite.
+    """Parse FHIR resources from *source* into PostgreSQL.
 
     Parameters
     ----------
@@ -269,9 +269,9 @@ def run_ingest(source: FhirSource | str) -> None:
         source = SyntheaFileSource(source)
 
     conn = get_connection()
-    # Disable FK checks during bulk load to avoid ordering issues
-    # with cross-bundle references. Re-enable after commit.
-    conn.execute("PRAGMA foreign_keys=OFF")
+    # Defer FK checks during bulk load to avoid ordering issues
+    # with cross-bundle references. Checked at commit time.
+    conn.execute("SET CONSTRAINTS ALL DEFERRED")
     counts: dict[str, int] = {t: 0 for t in _PLACEHOLDERS}
 
     # Accumulate rows per table, then batch-insert
@@ -296,15 +296,15 @@ def run_ingest(source: FhirSource | str) -> None:
         data = rows[table]
         if not data:
             continue
-        ph = ",".join(["?"] * _PLACEHOLDERS[table])
-        sql = f"INSERT OR IGNORE INTO {table} VALUES ({ph})"
-        conn.executemany(sql, data)
+        ph = ",".join(["%s"] * _PLACEHOLDERS[table])
+        sql = f"INSERT INTO {table} VALUES ({ph}) ON CONFLICT DO NOTHING"
+        with conn.cursor() as cur:
+            cur.executemany(sql, data)
         counts[table] = len(data)
 
     conn.commit()
-    conn.execute("PRAGMA foreign_keys=ON")
     conn.close()
 
-    logger.info("Ingest complete. Row counts attempted (INSERT OR IGNORE):")
+    logger.info("Ingest complete. Row counts attempted (ON CONFLICT DO NOTHING):")
     for table, c in counts.items():
         logger.info("  %-15s %d", table, c)

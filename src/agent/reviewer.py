@@ -1,7 +1,7 @@
 """Claude-powered readmission review agent.
 
 Calls the Anthropic API to perform structured peer review of 30-day
-hospital readmissions, stores results in SQLite and output files.
+hospital readmissions, stores results in PostgreSQL and output files.
 """
 
 from __future__ import annotations
@@ -169,8 +169,14 @@ def _store_review(
     structured_json_str = json.dumps(structured, indent=2)
 
     conn.execute(
-        """INSERT OR REPLACE INTO reviews (pair_id, structured_json, clinical_narrative, model_used, created_at, tokens_used)
-           VALUES (?, ?, ?, ?, ?, ?)""",
+        """INSERT INTO reviews (pair_id, structured_json, clinical_narrative, model_used, created_at, tokens_used)
+           VALUES (%s, %s, %s, %s, %s, %s)
+           ON CONFLICT (pair_id) DO UPDATE SET
+               structured_json = EXCLUDED.structured_json,
+               clinical_narrative = EXCLUDED.clinical_narrative,
+               model_used = EXCLUDED.model_used,
+               created_at = EXCLUDED.created_at,
+               tokens_used = EXCLUDED.tokens_used""",
         (pair_id, structured_json_str, narrative, MODEL, now, tokens_used),
     )
     conn.commit()

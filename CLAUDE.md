@@ -7,16 +7,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 # Setup
 python3 -m venv .venv && source .venv/bin/activate
-pip install typer anthropic matplotlib rich httpx pytest pytest-cov
+pip install typer anthropic matplotlib rich httpx pytest pytest-cov "psycopg[binary]"
 
-# Run tests
+# Run tests (requires DATABASE_URL pointing to a PostgreSQL database)
+set -a && source .env && set +a
 python -m pytest tests/ -v
 python -m pytest tests/test_data.py -v              # just data pipeline tests
 python -m pytest tests/test_sources.py -v            # source adapters + Epic compat
 python -m pytest tests/test_agent.py::TestResponseParsing -v  # single test class
 python -m pytest tests/test_analytics.py -k "test_counts" -v  # by name pattern
 
-# CLI commands (source .env first for API calls)
+# CLI commands (source .env first for API calls + DATABASE_URL)
 set -a && source .env && set +a
 python main.py ingest --dir <synthea-fhir-dir>       # file-based ingest
 python main.py ingest --fhir-url http://localhost:8080/fhir  # FHIR API ingest
@@ -31,7 +32,7 @@ cd /tmp/synthea && ./run_synthea -p 500 -a 50-90
 
 ## Architecture
 
-SQLite is the shared contract between all modules. `src/schema.py` defines 9 tables and `get_connection()` returns an initialized connection (WAL mode, foreign keys, row_factory=Row). All modules import from `src.schema`.
+PostgreSQL (deployed on Railway) is the shared contract between all modules. `src/schema.py` defines 9 tables and `get_connection()` returns an initialized psycopg connection with `dict_row` factory. All modules import from `src.schema`. Connection is configured via `DATABASE_URL` environment variable.
 
 **Pipeline flow:** `source adapter → ingest (parse + load) → identify-pairs → review → analyze`
 
@@ -46,7 +47,7 @@ Shared FHIR parsing helpers live in `base.py`: `ref()` (strips reference prefixe
 
 ### Ingest + Parsers (`src/data/ingest.py`)
 
-`run_ingest(source)` accepts any `FhirSource`, iterates resources, routes each through `_parse_*` functions, and batch-inserts into SQLite. The parsers handle both Synthea and Epic FHIR patterns:
+`run_ingest(source)` accepts any `FhirSource`, iterates resources, routes each through `_parse_*` functions, and batch-inserts into PostgreSQL. Uses `SET CONSTRAINTS ALL DEFERRED` during bulk load and `ON CONFLICT DO NOTHING` for idempotency. The parsers handle both Synthea and Epic FHIR patterns:
 - `_parse_medication`: falls back from `medicationCodeableConcept` to `medicationReference.display`
 - `_parse_encounter`: falls back from `reasonCode` to `reasonReference`
 - `_parse_observation`: handles `component` arrays (e.g., blood pressure)
@@ -58,7 +59,7 @@ Shared FHIR parsing helpers live in `base.py`: `ref()` (strips reference prefixe
 
 - **src/agent/context.py** — Assembles clinical context dict from a readmission_pair row with 4 sections: patient_baseline, index_admission, interval_care, readmission. `context_to_prompt_string()` serializes for the LLM.
 
-- **src/agent/reviewer.py** — Sends context to Claude with a hospitalist peer review system prompt. Extracts structured JSON from ` ```json``` ` fences and narrative from remainder. Stores in `reviews` table + `output/reviews/`. Exponential backoff on 429s.
+- **src/agent/reviewer.py** — Sends context to Claude with a hospitalist peer review system prompt. Extracts structured JSON from ` ```json``` ` fences and narrative from remainder. Stores in `reviews` table + `output/reviews/`. Uses `ON CONFLICT (pair_id) DO UPDATE` for upsert. Exponential backoff on 429s.
 
 - **src/analytics/analyze.py** — Cohort metrics + matplotlib PNGs to `output/analytics/` + `summary.json`. Must use `matplotlib.use('Agg')` before other matplotlib imports.
 
@@ -66,7 +67,9 @@ Shared FHIR parsing helpers live in `base.py`: `ref()` (strips reference prefixe
 
 ## Key Patterns
 
-- **DB in tests:** Use `get_connection(":memory:")` for in-memory databases. Tests in `test_data.py` use `monkeypatch` to redirect `DEFAULT_DB_PATH` to a temp file.
+- **Database:** PostgreSQL via `psycopg` (v3) with `dict_row` factory. Connection URL from `DATABASE_URL` env var. Schema uses `DEFERRABLE` foreign keys for bulk load support. The `"end"` column is quoted in SQL (reserved word in PostgreSQL).
+- **DB in tests:** Tests use `DATABASE_URL` pointing to a PostgreSQL database. `conftest.py` patches `DATABASE_URL` and provides `db_conn` fixture that truncates all tables between tests. No SQLite.
+- **SQL placeholders:** All queries use `%s` (psycopg format), not `?` (sqlite3 format).
 - **API key:** Read from `ANTHROPIC_API_KEY` env var (stored in `.env`, not auto-loaded — must source before running).
 - **FHIR token:** `FHIR_TOKEN` env var or `--token` flag for FHIR API auth.
 - **Model:** Set as `MODEL` constant in `reviewer.py` (currently `claude-sonnet-4-6`).

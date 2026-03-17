@@ -19,7 +19,7 @@ def run_identify_pairs() -> None:
     # Fetch all inpatient encounters ordered by patient then start date
     rows = conn.execute(
         """
-        SELECT id, patient_id, start, end, reason_code, reason_display
+        SELECT id, patient_id, start, "end", reason_code, reason_display
         FROM encounters
         WHERE type = 'inpatient'
         ORDER BY patient_id, start
@@ -75,10 +75,11 @@ def run_identify_pairs() -> None:
         logger.info("Skipped %d planned readmission(s).", skipped_planned)
 
     if pairs:
-        conn.executemany(
-            "INSERT INTO readmission_pairs (index_encounter_id, readmission_encounter_id, days_between, patient_id) VALUES (?, ?, ?, ?)",
-            pairs,
-        )
+        with conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO readmission_pairs (index_encounter_id, readmission_encounter_id, days_between, patient_id) VALUES (%s, %s, %s, %s)",
+                pairs,
+            )
 
     conn.commit()
     conn.close()

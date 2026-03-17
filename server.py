@@ -1,8 +1,6 @@
 """FastAPI backend for the readmissions review agent."""
 
 import json
-import sqlite3
-from contextlib import asynccontextmanager
 from datetime import date
 from typing import Any
 
@@ -21,16 +19,10 @@ from src.analytics.analyze import (
 )
 from src.agent.context import assemble_context
 
-from src.schema import DEFAULT_DB_PATH
 
-
-def get_db() -> sqlite3.Connection:
-    """Create a new connection per call — safe for multi-threaded use."""
-    conn = sqlite3.connect(str(DEFAULT_DB_PATH), check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+def get_db():
+    """Create a new PostgreSQL connection per call."""
+    return get_connection()
 
 
 app = FastAPI(title="Readmissions Review Agent API")
@@ -60,10 +52,10 @@ def _compute_age(birth_date_str: str | None) -> int | None:
 @app.get("/api/summary")
 def get_summary():
     conn = get_db()
-    patients = conn.execute("SELECT COUNT(*) FROM patients").fetchone()[0]
-    encounters = conn.execute("SELECT COUNT(*) FROM encounters").fetchone()[0]
-    pairs = conn.execute("SELECT COUNT(*) FROM readmission_pairs").fetchone()[0]
-    review_count = conn.execute("SELECT COUNT(*) FROM reviews").fetchone()[0]
+    patients = conn.execute("SELECT COUNT(*) AS cnt FROM patients").fetchone()["cnt"]
+    encounters = conn.execute("SELECT COUNT(*) AS cnt FROM encounters").fetchone()["cnt"]
+    pairs = conn.execute("SELECT COUNT(*) AS cnt FROM readmission_pairs").fetchone()["cnt"]
+    review_count = conn.execute("SELECT COUNT(*) AS cnt FROM reviews").fetchone()["cnt"]
 
     reviews = _fetch_reviews(conn)
     rc = root_cause_distribution(reviews)
@@ -96,7 +88,7 @@ def get_reviews():
             """SELECT rp.id, rp.days_between, p.birth_date, p.gender
                FROM readmission_pairs rp
                JOIN patients p ON p.id = rp.patient_id
-               WHERE rp.id = ?""",
+               WHERE rp.id = %s""",
             (r["pair_id"],),
         ).fetchone()
 
@@ -128,7 +120,7 @@ def get_review_detail(pair_id: int):
     conn = get_db()
 
     pair_row = conn.execute(
-        "SELECT * FROM readmission_pairs WHERE id = ?", (pair_id,)
+        "SELECT * FROM readmission_pairs WHERE id = %s", (pair_id,)
     ).fetchone()
     if not pair_row:
         raise HTTPException(status_code=404, detail="Pair not found")
@@ -136,7 +128,7 @@ def get_review_detail(pair_id: int):
     context = assemble_context(pair_row, conn)
 
     review_row = conn.execute(
-        "SELECT * FROM reviews WHERE pair_id = ?", (pair_id,)
+        "SELECT * FROM reviews WHERE pair_id = %s", (pair_id,)
     ).fetchone()
 
     review = None
