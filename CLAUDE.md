@@ -5,12 +5,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-# Setup
+# Setup — Python backend
 python3 -m venv .venv && source .venv/bin/activate
-pip install typer anthropic matplotlib rich httpx pytest pytest-cov "psycopg[binary]"
+pip install typer anthropic matplotlib rich httpx pytest pytest-cov "psycopg[binary]" fastapi "uvicorn[standard]"
 
-# Run tests (requires DATABASE_URL pointing to a PostgreSQL database)
-set -a && source .env && set +a
+# Setup — Next.js frontend
+cd web && npm install && cd ..
+
+# Run tests (uses local postgresql://localhost/readmissions_test by default)
 python -m pytest tests/ -v
 python -m pytest tests/test_data.py -v              # just data pipeline tests
 python -m pytest tests/test_sources.py -v            # source adapters + Epic compat
@@ -26,6 +28,10 @@ python main.py review --dry-run          # preview context, no API call
 python main.py review --limit N
 python main.py analyze
 
+# Start the web app (two terminals)
+set -a && source .env && set +a && python server.py   # FastAPI on :8000
+cd web && npm run dev                                  # Next.js on :3000
+
 # Generate synthetic data (requires Java)
 cd /tmp/synthea && ./run_synthea -p 500 -a 50-90
 ```
@@ -35,6 +41,12 @@ cd /tmp/synthea && ./run_synthea -p 500 -a 50-90
 PostgreSQL (deployed on Railway) is the shared contract between all modules. `src/schema.py` defines 9 tables and `get_connection()` returns an initialized psycopg connection with `dict_row` factory. All modules import from `src.schema`. Connection is configured via `DATABASE_URL` environment variable.
 
 **Pipeline flow:** `source adapter → ingest (parse + load) → identify-pairs → review → analyze`
+
+### Web UI
+
+- **`server.py`** — FastAPI backend (port 8000). Uses thread-local psycopg connections to Railway PostgreSQL. Provides REST API for the frontend.
+- **`web/`** — Next.js 16 + TypeScript + Tailwind CSS frontend (port 3000). App Router with 4 pages: Dashboard, Readmissions, Reviews, Analytics.
+- **API endpoints:** `GET /api/summary`, `GET /api/pairs`, `GET /api/reviews`, `GET /api/reviews/{id}`, `POST /api/reviews/{id}/run` (triggers AI review), `GET /api/analytics`, `GET /api/analytics/by-root-cause`, `GET /api/analytics/by-diagnosis`, `GET /api/analytics/by-gender`, `GET /api/analytics/by-age-group`, `GET /api/analytics/by-days-between`.
 
 ### Data Source Layer (`src/data/sources/`)
 
@@ -67,9 +79,10 @@ Shared FHIR parsing helpers live in `base.py`: `ref()` (strips reference prefixe
 
 ## Key Patterns
 
-- **Database:** PostgreSQL via `psycopg` (v3) with `dict_row` factory. Connection URL from `DATABASE_URL` env var. Schema uses `DEFERRABLE` foreign keys for bulk load support. The `"end"` column is quoted in SQL (reserved word in PostgreSQL).
-- **DB in tests:** Tests use `DATABASE_URL` pointing to a PostgreSQL database. `conftest.py` patches `DATABASE_URL` and provides `db_conn` fixture that truncates all tables between tests. No SQLite.
-- **SQL placeholders:** All queries use `%s` (psycopg format), not `?` (sqlite3 format).
+- **Database:** PostgreSQL on Railway via `psycopg` (v3) with `dict_row` factory. Connection URL from `DATABASE_URL` env var. Schema uses `DEFERRABLE` foreign keys for bulk load support. The `"end"` column is quoted in SQL (reserved word in PostgreSQL).
+- **DB in tests:** Tests default to `postgresql://localhost/readmissions_test` (NOT Railway production). `conftest.py` patches `DATABASE_URL` and provides `db_conn` fixture that truncates all tables between tests. Override with `TEST_DATABASE_URL` env var if needed.
+- **Server connections:** `server.py` uses `threading.local()` for one persistent connection per uvicorn worker thread (avoids reconnect + schema DDL per request).
+- **SQL placeholders:** All queries use `%s` (psycopg format).
 - **API key:** Read from `ANTHROPIC_API_KEY` env var (stored in `.env`, not auto-loaded — must source before running).
 - **FHIR token:** `FHIR_TOKEN` env var or `--token` flag for FHIR API auth.
 - **Model:** Set as `MODEL` constant in `reviewer.py` (currently `claude-sonnet-4-6`).

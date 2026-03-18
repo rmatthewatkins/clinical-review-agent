@@ -11,7 +11,7 @@ import os
 import psycopg
 from psycopg.rows import dict_row
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://localhost/readmissions")
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:veccJBywZEQmoiQMQliRMJEkhoTnBKmx@turntable.proxy.rlwy.net:52958/railway")
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS patients (

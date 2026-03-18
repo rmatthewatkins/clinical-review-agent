@@ -6,6 +6,23 @@ export async function fetchApi<T>(path: string): Promise<T> {
   return res.json();
 }
 
+export async function postApi<T>(path: string): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, { method: "POST", cache: "no-store" });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`API ${path}: ${res.status} ${body}`);
+  }
+  return res.json();
+}
+
+export interface RunReviewResult {
+  pair_id: number;
+  was_update: boolean;
+  root_cause_category: string | null;
+  preventability_score: number | null;
+  tokens_used: number;
+}
+
 // --- Types ---
 
 export interface Summary {
@@ -87,7 +104,57 @@ export interface ReviewDetail {
   } | null;
 }
 
+export interface Pair {
+  pair_id: number;
+  patient_id: string;
+  age: number | null;
+  gender: string | null;
+  race: string | null;
+  days_between: number;
+  index_start: string | null;
+  index_end: string | null;
+  index_diagnosis: string;
+  discharge_disposition: string | null;
+  readmit_start: string | null;
+  readmit_end: string | null;
+  readmit_diagnosis: string;
+  has_review: boolean;
+  root_cause: string | null;
+  preventability_score: number | null;
+  reviewed_at: string | null;
+}
+
 export interface Analytics {
   contributing_factors: Array<{ factor: string; count: number }>;
   recommended_interventions: Array<{ intervention: string; count: number }>;
+}
+
+export interface RootCauseRow {
+  category: string;
+  count: number;
+  pairs: Array<{ pair_id: number; preventability_score: number | null }>;
+}
+
+export interface DiagnosisRow {
+  diagnosis: string;
+  count: number;
+  pairs: Array<{ pair_id: number; root_cause: string | null; preventability_score: number | null }>;
+}
+
+export interface GenderRow {
+  gender: string;
+  count: number;
+  pairs: Array<{ pair_id: number; root_cause: string | null; preventability_score: number | null }>;
+}
+
+export interface AgeGroupRow {
+  age_group: string;
+  count: number;
+  pairs: Array<{ pair_id: number; age: number | null; days_between: number }>;
+}
+
+export interface DaysBetweenRow {
+  bucket: string;
+  count: number;
+  pairs: Array<{ pair_id: number; days_between: number }>;
 }

@@ -6,28 +6,37 @@ An AI-powered clinical readmissions review agent that ingests FHIR patient data 
 
 ```
 src/
-├── schema.py          # Shared SQLite schema (9 tables) — the contract between all modules
+├── schema.py                # Shared PostgreSQL schema (9 tables) — the contract between all modules
 ├── data/
-│   ├── sources/       # Pluggable FHIR data source adapters
-│   │   ├── base.py    # FhirSource protocol + shared FHIR parsing helpers
+│   ├── sources/             # Pluggable FHIR data source adapters
+│   │   ├── base.py          # FhirSource protocol + shared FHIR parsing helpers
 │   │   ├── synthea_file.py  # File-based source (Synthea Bundle JSONs)
-│   │   └── fhir_api.py     # FHIR R4 REST API client (Epic, HAPI, etc.)
-│   ├── ingest.py      # Source-agnostic FHIR parser → SQLite
-│   └── pairs.py       # 30-day readmission pair identifier (filters planned readmissions)
+│   │   └── fhir_api.py      # FHIR R4 REST API client (Epic, HAPI, etc.)
+│   ├── ingest.py            # Source-agnostic FHIR parser → PostgreSQL
+│   └── pairs.py             # 30-day readmission pair identifier (filters planned readmissions)
 ├── agent/
-│   ├── context.py     # Clinical context assembler from DB
-│   └── reviewer.py    # Claude API integration + structured peer review
+│   ├── context.py           # Clinical context assembler from DB
+│   └── reviewer.py          # Claude API integration + structured peer review
 └── analytics/
-    └── analyze.py     # Cohort-level analytics + matplotlib visualizations
+    └── analyze.py           # Cohort-level analytics + matplotlib visualizations
+
+server.py                    # FastAPI REST API backend (port 8000)
+web/                         # Next.js + TypeScript + Tailwind frontend (port 3000)
+├── app/
+│   ├── page.tsx             # Dashboard — summary metrics, charts, quick links
+│   ├── readmissions/        # All readmission pairs with review status
+│   ├── reviews/             # Completed reviews list + detail view with AI review trigger
+│   └── analytics/           # Multi-dimension analytics (root cause, diagnosis, gender, age, etc.)
+└── lib/api.ts               # API client + TypeScript types
 ```
 
 ### Pipeline
 
 ```
-FHIR Source (files or API) → ingest → SQLite → identify-pairs → review (Claude) → analyze
+FHIR Source (files or API) → ingest → PostgreSQL → identify-pairs → review (Claude) → analyze
 ```
 
-1. **Ingest** accepts any FHIR data source — Synthea JSON files on disk or a FHIR R4 REST API (Epic, HAPI) — and normalizes resources (Patient, Encounter, Condition, MedicationRequest, Observation, Procedure, CarePlan) into a SQLite database.
+1. **Ingest** accepts any FHIR data source — Synthea JSON files on disk or a FHIR R4 REST API (Epic, HAPI) — and normalizes resources (Patient, Encounter, Condition, MedicationRequest, Observation, Procedure, CarePlan) into PostgreSQL (hosted on Railway).
 2. **Identify Pairs** finds inpatient encounters followed by another inpatient encounter for the same patient within 30 days of discharge. Planned readmissions (e.g., recurring chemotherapy cycles with identical reason codes) are automatically filtered out.
 3. **Review** assembles a clinical context package for each pair — index admission details, interval care, readmission presentation, and patient baseline — then sends it to Claude for structured peer review.
 4. **Analyze** computes cohort-level metrics across completed reviews and generates visualizations.
@@ -35,6 +44,7 @@ FHIR Source (files or API) → ingest → SQLite → identify-pairs → review (
 ## Prerequisites
 
 - Python 3.11+
+- Node.js 18+ (for the web UI)
 - Java (for running Synthea)
 - An Anthropic API key
 
@@ -44,16 +54,20 @@ FHIR Source (files or API) → ingest → SQLite → identify-pairs → review (
 # Clone the repo
 git clone <repo-url> && cd readmission-review-agent
 
-# Create virtual environment and install dependencies
+# Create virtual environment and install Python dependencies
 python3 -m venv .venv
 source .venv/bin/activate
-pip install typer anthropic matplotlib rich httpx
+pip install typer anthropic matplotlib rich httpx "psycopg[binary]" fastapi "uvicorn[standard]"
 
 # Install dev dependencies for testing
 pip install pytest pytest-cov
 
-# Set your API key
-echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
+# Install frontend dependencies
+cd web && npm install && cd ..
+
+# Set your API key and database URL
+echo 'ANTHROPIC_API_KEY=sk-ant-...' >> .env
+echo 'DATABASE_URL=postgresql://...' >> .env
 ```
 
 ## Generating Synthetic Data
@@ -94,7 +108,7 @@ python main.py ingest --fhir-url http://localhost:8080/fhir
 python main.py ingest --fhir-url https://fhir.epic.com/.../R4 --token "$FHIR_TOKEN"
 ```
 
-Normalizes FHIR resources and loads them into `data/readmissions.db`. The FHIR API client handles pagination, auth, and rate limiting automatically.
+Normalizes FHIR resources and loads them into PostgreSQL. The FHIR API client handles pagination, auth, and rate limiting automatically.
 
 ### 2. Identify readmission pairs
 
@@ -121,7 +135,7 @@ Each review produces:
 - **Structured JSON** — root cause category, preventability score (1-5), contributing factors, recommended interventions, confidence level
 - **Clinical narrative** — 2-3 paragraph physician-style prose review
 
-Results are stored in SQLite and written to `output/reviews/` as individual `.json` and `.md` files.
+Results are stored in PostgreSQL and written to `output/reviews/` as individual `.json` and `.md` files.
 
 ### 4. Generate analytics
 
@@ -136,6 +150,24 @@ Produces cohort-level analysis in `output/analytics/`:
 - `recommended_interventions.png` — most common recommended interventions
 - `preventability_histogram.png` — preventability score distribution (1-5)
 - `summary.json` — all computed metrics
+
+### 5. Start the web UI
+
+```bash
+# Terminal 1 — FastAPI backend
+set -a && source .env && set +a
+python server.py                    # http://localhost:8000
+
+# Terminal 2 — Next.js frontend
+cd web && npm run dev               # http://localhost:3000
+```
+
+The web UI provides:
+- **Dashboard** — Summary metrics (patients, encounters, pairs, reviews), root cause distribution, preventability charts, quick navigation links
+- **Readmissions** — All identified readmission pairs with patient demographics, encounter details, and review status (Reviewed/Pending). Sortable and searchable.
+- **Reviews** — Completed reviews with colored preventability badges, root cause pills, and confidence indicators. Click any review to see the full detail.
+- **Review Detail** — Two-column deep-dive: clinical context (left) and AI review (right). Includes a **"Run AI Review"** button to trigger Claude review directly from the browser.
+- **Analytics** — Multi-dimension analysis across 7 tabs: by root cause, diagnosis, gender, age group, days to readmission, contributing factors, and recommended interventions.
 
 ## Review Schema
 
@@ -152,7 +184,7 @@ Each AI review produces a structured assessment with these fields:
 
 ## Database Schema
 
-The SQLite database (`data/readmissions.db`) contains 9 tables:
+The PostgreSQL database (hosted on Railway) contains 9 tables:
 
 - **patients** — demographics, location, race/ethnicity
 - **encounters** — type, dates, reason, discharge disposition
@@ -171,7 +203,7 @@ python -m pytest tests/ -v
 ```
 
 Tests cover:
-- FHIR bundle parsing and SQLite loading (`test_data.py`)
+- FHIR bundle parsing and PostgreSQL loading (`test_data.py`)
 - Readmission pair identification with edge cases (`test_data.py`)
 - Clinical context assembly (`test_agent.py`)
 - Claude response parsing (`test_agent.py`)
@@ -182,7 +214,7 @@ Tests cover:
 | Setting | Location | Default |
 |---------|----------|---------|
 | Claude model | `src/agent/reviewer.py` | `claude-sonnet-4-6` |
-| Database path | `src/schema.py` | `data/readmissions.db` |
+| Database URL | `src/schema.py` | `DATABASE_URL` env var (Railway PostgreSQL) |
 | Review output | `src/agent/reviewer.py` | `output/reviews/` |
 | Analytics output | `src/analytics/analyze.py` | `output/analytics/` |
 | Readmission window | `src/data/pairs.py` | 30 days |

@@ -1,7 +1,7 @@
 """Shared test fixtures for PostgreSQL-backed tests.
 
-Set TEST_DATABASE_URL or DATABASE_URL to point at a test PostgreSQL database.
-The public Railway URL is used by default for convenience.
+Set TEST_DATABASE_URL to point at a test PostgreSQL database.
+Falls back to a local readmissions_test database — NEVER uses the production Railway DB.
 """
 
 import os
@@ -11,10 +11,10 @@ import pytest
 import src.schema as schema_mod
 from src.schema import ALL_TABLES
 
-# Use a test database URL — prefer TEST_DATABASE_URL, then DATABASE_URL, then default
+# Use a dedicated test database — never default to production Railway
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
-    os.environ.get("DATABASE_URL", "postgresql://localhost/readmissions_test"),
+    "postgresql://localhost/readmissions_test",
 )
 
 

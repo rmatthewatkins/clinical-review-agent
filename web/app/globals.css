@@ -10,6 +10,18 @@
   --accent-light: #dbeafe;
 }
 
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0f172a;
+    --foreground: #f1f5f9;
+    --card: #1e293b;
+    --border: #334155;
+    --muted: #94a3b8;
+    --accent: #60a5fa;
+    --accent-light: #1e3a5f;
+  }
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
