@@ -197,6 +197,29 @@ CREATE TABLE IF NOT EXISTS mortality_cases (
     FOREIGN KEY (patient_id) REFERENCES patients(id) DEFERRABLE
 );
 
+-- AHRQ Patient Safety Indicator (PSI) candidate cases. One row per
+-- (encounter, psi_number). A row exists for each PSI whose numerator
+-- fired on the encounter; the denominator/exclusion verdict is recorded
+-- so reviewers can see why a candidate was kept or set aside.
+CREATE TABLE IF NOT EXISTS psi_cases (
+    id SERIAL PRIMARY KEY,
+    encounter_id TEXT NOT NULL,
+    patient_id TEXT NOT NULL,
+    psi_number TEXT NOT NULL,         -- e.g. "06", "03", "12"
+    psi_name TEXT NOT NULL,           -- AHRQ short name
+    numerator_met BOOLEAN NOT NULL,
+    denominator_met BOOLEAN NOT NULL,
+    exclusion_reasons TEXT,           -- JSON array of strings
+    poa_imputation TEXT,              -- "prior_admission_lookback" | "n/a" | "assumed_not_poa"
+    poa_confidence TEXT,              -- "high" | "medium" | "low"
+    identified_at TEXT,
+    FOREIGN KEY (encounter_id) REFERENCES encounters(id) DEFERRABLE,
+    FOREIGN KEY (patient_id) REFERENCES patients(id) DEFERRABLE
+);
+
+CREATE INDEX IF NOT EXISTS psi_cases_encounter_idx ON psi_cases (encounter_id);
+CREATE UNIQUE INDEX IF NOT EXISTS psi_cases_unique_idx ON psi_cases (encounter_id, psi_number);
+
 CREATE TABLE IF NOT EXISTS reviews (
     id SERIAL PRIMARY KEY,
     case_type TEXT NOT NULL DEFAULT 'readmission',
@@ -212,9 +235,9 @@ CREATE TABLE IF NOT EXISTS reviews (
 
 # Table names in FK-safe order (children before parents) for truncation
 ALL_TABLES = [
-    "reviews", "mortality_cases", "readmissions", "notes", "care_plans",
-    "procedures", "observations", "medications", "conditions", "encounters",
-    "patients",
+    "reviews", "psi_cases", "mortality_cases", "readmissions", "notes",
+    "care_plans", "procedures", "observations", "medications", "conditions",
+    "encounters", "patients",
 ]
 
 

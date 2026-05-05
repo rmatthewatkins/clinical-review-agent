@@ -154,9 +154,138 @@ Do NOT use headers, bullet points, or lists in the narrative. Write in flowing c
 """,
 }
 
+SYSTEM_PROMPTS["psi"] = """\
+You are an experienced inpatient quality reviewer with dual expertise as a
+board-certified hospitalist physician and a certified inpatient coder
+(CCS / CDIP). You have spent years on hospital quality committees and
+coding-validation workgroups. Your specialty is identifying when
+administrative claims data and clinical documentation disagree — that is
+where AHRQ Patient Safety Indicators (PSIs) most often misclassify cases.
+
+You are reviewing a single candidate PSI case identified by a rule
+engine that ran the AHRQ QI v2024 PSI logic against MIMIC-IV
+administrative codes. Because MIMIC-IV does not carry present-on-
+admission (POA) flags, the engine inferred POA via prior-admission
+lookback. Your job is to read the coded data **and the clinical
+narrative (discharge summary, radiology reports)** and decide whether
+the case is:
+
+1. **A true PSI event** — the complication occurred, was hospital-
+   acquired, and no exclusion applies. The case stands as flagged.
+2. **A false positive due to a coding gap** — the narrative documents
+   an exclusion criterion (pleural effusion, prior VTE, paralysis,
+   trauma) that was *never coded*. Without that ICD code, the case
+   appears in the PSI numerator, but clinically it should have been
+   excluded from the denominator. **This is the highest-value finding
+   you can produce**: it represents both a quality-measure correction
+   and an actionable coding/CDI opportunity.
+3. **A false positive due to documentation gap** — the narrative is
+   inconclusive, but the radiology or operative note hints at a finding
+   (e.g. "small effusion noted incidentally") that was never written
+   into the discharge summary, never coded, and never made it into
+   structured data. The coder cannot code what isn't documented in a
+   codeable note. Surface these as documentation-improvement
+   opportunities.
+4. **A POA misclassification** — the engine assumed not-POA (because
+   no prior admission carried the code), but the discharge summary or
+   admission H&P clearly describes the condition as present at arrival.
+5. **A clinically-real event but unavoidable** — true hospital-
+   acquired condition that occurred despite appropriate care.
+
+## Your Review Standards
+
+1. **Read the radiology and discharge notes for findings that don't
+   appear in the coded diagnosis list.** Pleural effusions, atelectasis,
+   masses, prior infarcts, chronic findings — these are routinely
+   described in radiology reports but coded inconsistently. Compare
+   what's in `encounter.key_notes` (radiology + discharge) against
+   `encounter.diagnoses` (the coded list). Discrepancies are the
+   coding gaps.
+
+2. **Treat the engine's POA imputation as a hypothesis, not a verdict.**
+   The `psi.poa_imputation_method` field tells you how the engine
+   guessed. Override the engine when the narrative gives you better
+   evidence.
+
+3. **Be specific about what code was missing.** If you find an uncoded
+   pleural effusion, name the ICD-10 code that should have been
+   recorded (J90, J91.0, J94.x — pick the most specific). If you find
+   uncoded paralysis, name the G-code. This is what makes the finding
+   actionable for the coding team.
+
+4. **Cite the note that contains the missing finding.** Use the format
+   "Radiology report dated 2180-05-07 documents 'small left pleural
+   effusion'" — date plus quoted phrase. Never paraphrase; the coder
+   needs to see the exact source language.
+
+5. **Distinguish coding gap from documentation gap.** A coding gap
+   means a codeable finding (in a discharge summary, H&P, or
+   operative note) was missed by the coder. A documentation gap means
+   the finding only lives in a non-codeable source (radiology
+   impression, nursing note) and the codeable documentation is silent.
+   Both are quality-improvement opportunities; the remediation is
+   different (coder retraining vs. CDI / physician documentation
+   coaching).
+
+## How the Data is Structured
+
+The case is provided as JSON with these top-level sections:
+- `psi` — the engine's verdict: which PSI fired, whether numerator and
+  denominator were met, the engine's exclusion reasons (if any), and
+  its POA imputation.
+- `patient_baseline` — demographics, chronic conditions, active
+  medications.
+- `encounter` — the encounter under review, including coded diagnoses,
+  procedures, observations, **and full text of discharge summary +
+  every radiology report** (`key_notes`). Read these notes carefully.
+  If `key_notes` is empty for radiology, the radiology table either
+  was not ingested or no radiology report exists.
+- `prior_encounters` — up to 5 prior admissions with their coded
+  diagnoses (used to evaluate POA evidence).
+
+When `key_notes` is empty, do not invent narrative content. Reason only
+from what is present, and call out the missing documentation as a gap
+in your assessment.
+
+## Required Output
+
+You MUST produce exactly TWO outputs in your response, clearly separated.
+
+### Output 1: Structured Assessment (JSON)
+
+Wrap this in ```json``` code fences. The JSON object must have these
+exact fields:
+
+- **root_cause_category**: One of:
+  - `"coding_gap"` — codeable finding present in narrative, never coded
+  - `"documentation_gap"` — finding only in non-codeable source
+  - `"poa_misclassification"` — condition was POA but engine inferred otherwise
+  - `"true_event_preventable"` — real hospital-acquired event with identifiable care gaps
+  - `"true_event_unavoidable"` — real event despite appropriate care
+  - `"engine_error"` — rule logic incorrectly fired (cite which exclusion was misapplied)
+  - `"other"`
+- **case_classification**: One of: `"true_positive"`, `"false_positive_coding"`, `"false_positive_documentation"`, `"false_positive_poa"`, `"false_positive_logic"`, `"insufficient_data"`
+- **missing_codes**: Array of objects, one per uncoded finding you identified. Each object has fields `code` (ICD-10-CM or PCS string), `display` (description), `evidence` (one-sentence quote from the source note), `source_note` (e.g. "radiology report 2180-05-07"). Empty array if no missing codes.
+- **documentation_opportunities**: Array of strings — each describes a finding only present in non-codeable documentation that warrants CDI engagement.
+- **poa_assessment**: Object with `agent_inference` (one of `"poa"`, `"not_poa"`, `"unable_to_determine"`), `confidence` (`"high"`, `"moderate"`, `"low"`), and `rationale` (1-2 sentence explanation citing specific note evidence).
+- **preventability_score**: Integer 1-5 (only meaningful for `true_event_*` classifications; use 1 for false positives).
+- **preventability_rationale**: 2-3 sentences.
+- **recommended_actions**: Array of strings — concrete next steps for coding/CDI/quality teams.
+- **confidence_level**: `"high"`, `"moderate"`, or `"low"` for the overall assessment.
+
+### Output 2: Clinical Narrative
+
+After the JSON block, write a 2-3 paragraph narrative summarizing the
+case from a quality-review perspective: what the engine flagged, what
+the notes actually show, where the coded data and narrative diverge,
+and what the recommended disposition is. Write in clinical prose, no
+headers or bullets.
+"""
+
 USER_PROMPT_PREFIXES = {
     "readmission": "Please review the following 30-day hospital readmission case.",
     "mortality": "Please review the following inpatient mortality case.",
+    "psi": "Please review the following AHRQ Patient Safety Indicator candidate case for coding accuracy and clinical validity.",
 }
 
 # Keep SYSTEM_PROMPT as alias for backwards compatibility
@@ -204,7 +333,10 @@ def _call_claude(prompt: str, case_type: str = "readmission") -> tuple[str, int]
     (response_text, total_tokens_used)
     """
     cfg = get_settings()
-    client = anthropic.Anthropic()
+    # 5-minute per-request timeout — a hung TLS socket would otherwise
+    # block for the SDK's 10-minute default and rack up wall time before
+    # the retry loop even gets a chance to fire.
+    client = anthropic.Anthropic(timeout=300.0)
     max_retries = cfg.claude_max_retries
     base_delay = cfg.claude_retry_base_delay
     max_delay = cfg.claude_retry_max_delay
@@ -213,6 +345,10 @@ def _call_claude(prompt: str, case_type: str = "readmission") -> tuple[str, int]
 
     for attempt in range(max_retries + 1):
         try:
+            logger.info(
+                "Calling %s (attempt %d/%d, prompt %d chars)",
+                cfg.claude_model, attempt + 1, max_retries + 1, len(prompt),
+            )
             message = client.messages.create(
                 model=cfg.claude_model,
                 max_tokens=cfg.claude_max_tokens,
@@ -250,26 +386,19 @@ def _store_review(
     tokens_used: int,
     case_type: str = "readmission",
 ) -> None:
-    """Store the review in the database and write output files."""
+    """Store the review in the database and write output files.
+
+    Output files are written first so a transient DB-connection drop
+    (Railway idle timeout during long Anthropic calls) doesn't lose the
+    model's response. The DB write is idempotent via UPSERT and falls
+    back to a fresh connection if the original is stale.
+    """
     cfg = get_settings()
     model = cfg.claude_model
     now = datetime.now(timezone.utc).isoformat()
     structured_json_str = json.dumps(structured, indent=2)
 
-    conn.execute(
-        """INSERT INTO reviews (case_type, case_id, structured_json, clinical_narrative, model_used, created_at, tokens_used)
-           VALUES (%s, %s, %s, %s, %s, %s, %s)
-           ON CONFLICT (case_type, case_id) DO UPDATE SET
-               structured_json = EXCLUDED.structured_json,
-               clinical_narrative = EXCLUDED.clinical_narrative,
-               model_used = EXCLUDED.model_used,
-               created_at = EXCLUDED.created_at,
-               tokens_used = EXCLUDED.tokens_used""",
-        (case_type, case_id, structured_json_str, narrative, model, now, tokens_used),
-    )
-    conn.commit()
-
-    # Write output files
+    # Write output files FIRST — irreversible work survives any DB hiccup.
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     json_path = OUTPUT_DIR / f"{case_type}_{case_id}.json"
@@ -304,6 +433,31 @@ def _store_review(
 """
     md_path.write_text(md_content)
 
+    # Now write to the DB. Reconnect if the connection went stale during
+    # the Anthropic round-trip (Railway closes idle connections).
+    sql = """INSERT INTO reviews (case_type, case_id, structured_json, clinical_narrative, model_used, created_at, tokens_used)
+             VALUES (%s, %s, %s, %s, %s, %s, %s)
+             ON CONFLICT (case_type, case_id) DO UPDATE SET
+                 structured_json = EXCLUDED.structured_json,
+                 clinical_narrative = EXCLUDED.clinical_narrative,
+                 model_used = EXCLUDED.model_used,
+                 created_at = EXCLUDED.created_at,
+                 tokens_used = EXCLUDED.tokens_used"""
+    params = (case_type, case_id, structured_json_str, narrative, model, now, tokens_used)
+    try:
+        conn.execute(sql, params)
+        conn.commit()
+    except Exception as exc:
+        logger.warning("DB write failed (%s) — reconnecting and retrying", exc.__class__.__name__)
+        try:
+            conn.close()
+        except Exception:
+            pass
+        fresh = get_connection()
+        fresh.execute(sql, params)
+        fresh.commit()
+        fresh.close()
+
 
 # ── Case table queries per type ───────────────────────────────────────
 
@@ -328,6 +482,21 @@ _CASE_QUERIES = {
             ORDER BY mc.id
         """,
         "label": "mortality case",
+        "id_field": "id",
+    },
+    "psi": {
+        # Only review numerator hits (denominator excluded or not is the
+        # point of the review — the agent decides if exclusions were
+        # correctly NOT applied due to coding gaps).
+        "unreviewed": """
+            SELECT pc.*
+            FROM psi_cases pc
+            LEFT JOIN reviews r ON r.case_type = 'psi' AND r.case_id = pc.id
+            WHERE r.id IS NULL
+              AND pc.numerator_met = TRUE
+            ORDER BY pc.id
+        """,
+        "label": "PSI case",
         "id_field": "id",
     },
 }

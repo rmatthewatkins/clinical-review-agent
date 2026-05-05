@@ -20,6 +20,11 @@ def _rows_to_dicts(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 # are the clinically definitive documents a peer reviewer would read first.
 _KEY_NOTE_CATEGORIES = {"discharge summary"}
 
+# Note categories whose full text we include for PSI review specifically.
+# Radiology reports are the canonical place where PSI exclusions hide
+# (e.g. an undiagnosed pleural effusion that should exclude PSI 06).
+_PSI_KEY_NOTE_CATEGORIES = {"discharge summary", "radiology"}
+
 # Physician-note descriptions that signal an admission narrative (HPI, PMH,
 # exam, A/P) — the closest MIMIC analog to an H&P. Matched case-insensitively
 # as substrings of the description.
@@ -42,6 +47,16 @@ def _is_key_note(category: str | None, description: str | None) -> bool:
         desc = (description or "").strip().lower()
         return any(p in desc for p in _KEY_PHYSICIAN_DESC_PATTERNS)
     return False
+
+
+def _is_psi_key_note(category: str | None, description: str | None) -> bool:
+    """Return True if this note's full text should be included in a PSI prompt.
+
+    PSI review needs radiology reports (and discharge summaries) — they
+    are where uncoded exclusions hide.
+    """
+    cat = (category or "").strip().lower()
+    return cat in _PSI_KEY_NOTE_CATEGORIES
 
 
 def _compute_age(birth_date_str: str | None, reference_date_str: str | None = None) -> int | None:
@@ -405,11 +420,117 @@ def _assemble_mortality_context(case_row: dict[str, Any], conn) -> dict[str, Any
     return context
 
 
+# ── PSI context ───────────────────────────────────────────────────────
+
+
+def _build_encounter_details_for_psi(encounter_id: str, conn) -> dict[str, Any]:
+    """Variant of _build_encounter_details that includes radiology notes.
+
+    PSI review hinges on detecting documentation/coding gaps — uncoded
+    findings in radiology reports that would change the indicator's
+    eligibility. The standard ``_build_encounter_details`` only includes
+    discharge summaries and admission H&Ps; this variant additionally
+    pulls full text of every radiology note attached to the encounter.
+    """
+    details = _build_encounter_details(encounter_id, conn)
+
+    cur = conn.cursor()
+    cur.execute(
+        """SELECT category, description, chartdate, charttime, text
+           FROM notes
+           WHERE encounter_id = %s
+           ORDER BY COALESCE(charttime, chartdate)""",
+        (encounter_id,),
+    )
+    note_rows = _rows_to_dicts(cur.fetchall())
+
+    psi_key_notes: list[dict] = []
+    for n in note_rows:
+        if _is_psi_key_note(n.get("category"), n.get("description")):
+            psi_key_notes.append({
+                "category": n.get("category"),
+                "description": n.get("description"),
+                "chartdate": n.get("chartdate"),
+                "charttime": n.get("charttime"),
+                "text": n.get("text"),
+            })
+
+    details["key_notes"] = psi_key_notes  # Override with the wider set
+    return details
+
+
+def _assemble_psi_context(case_row: dict[str, Any], conn) -> dict[str, Any]:
+    """Assemble a clinical context dict for an AHRQ PSI candidate case."""
+    case_row = dict(case_row)
+    encounter_id = case_row["encounter_id"]
+    patient_id = case_row["patient_id"]
+    psi_number = case_row["psi_number"]
+    psi_name = case_row["psi_name"]
+
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM encounters WHERE id = %s", (encounter_id,))
+    enc = dict(cur.fetchone() or {})
+    enc_start = enc.get("start")
+
+    patient_baseline = _build_patient_baseline(patient_id, enc_start, conn)
+    encounter_details = _build_encounter_details_for_psi(encounter_id, conn)
+
+    # Prior admissions (last 5) for POA context
+    cur.execute(
+        """SELECT id, start, "end", reason_code, reason_display, discharge_disposition
+           FROM encounters
+           WHERE patient_id = %s
+             AND id != %s
+             AND start < %s
+           ORDER BY start DESC
+           LIMIT 5""",
+        (patient_id, encounter_id, enc_start or "9999-12-31"),
+    )
+    prior_encounters = _rows_to_dicts(cur.fetchall())
+
+    # Per-prior-encounter coded diagnoses (only display + code, no notes)
+    for prior in prior_encounters:
+        cur.execute(
+            "SELECT code, display FROM conditions WHERE encounter_id = %s ORDER BY onset",
+            (prior["id"],),
+        )
+        prior["diagnoses"] = _rows_to_dicts(cur.fetchall())
+
+    # Decode the engine's exclusion_reasons + notes from the JSON blob
+    exclusion_payload: list[str] = []
+    if case_row.get("exclusion_reasons"):
+        try:
+            exclusion_payload = json.loads(case_row["exclusion_reasons"])
+        except (json.JSONDecodeError, TypeError):
+            exclusion_payload = []
+
+    psi_metadata = {
+        "psi_number": psi_number,
+        "psi_name": psi_name,
+        "numerator_met": case_row.get("numerator_met"),
+        "denominator_met": case_row.get("denominator_met"),
+        "exclusion_reasons_and_engine_notes": exclusion_payload,
+        "poa_imputation_method": case_row.get("poa_imputation"),
+        "poa_confidence": case_row.get("poa_confidence"),
+    }
+
+    context: dict[str, Any] = {
+        "case_type": "psi",
+        "case_id": case_row["id"],
+        "psi": psi_metadata,
+        "patient_baseline": patient_baseline,
+        "encounter": encounter_details,
+        "prior_encounters": prior_encounters,
+    }
+    return context
+
+
 # ── Dispatcher ────────────────────────────────────────────────────────
 
 _CONTEXT_BUILDERS = {
     "readmission": _assemble_readmission_context,
     "mortality": _assemble_mortality_context,
+    "psi": _assemble_psi_context,
 }
 
 

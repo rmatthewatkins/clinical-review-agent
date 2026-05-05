@@ -7,6 +7,7 @@ output/
 web/.next/
 web/node_modules/
 
-# Local PhysioNet/MIMIC artifacts — DUA forbids redistribution
-data/
+# Local PhysioNet/MIMIC artifacts — DUA forbids redistribution.
+# Anchored to repo root so we don't shadow `clinical_review_agent/data/`.
+/data/
 .DS_Store

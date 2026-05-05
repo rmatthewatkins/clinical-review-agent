@@ -125,9 +125,9 @@ def _dry_run_count(source) -> None:
 
 @app.command()
 def identify(
-    case_type: str = typer.Option("readmission", "--type", "-t", help="Case type to identify: readmission, mortality"),
+    case_type: str = typer.Option("readmission", "--type", "-t", help="Case type to identify: readmission, mortality, psi"),
 ):
-    """Identify cases (readmissions, mortality) from loaded encounter data."""
+    """Identify cases (readmissions, mortality, PSIs) from loaded encounter data."""
     setup_logging(fmt="text")
     if case_type == "readmission":
         from clinical_review_agent.data.pairs import run_identify_readmissions
@@ -135,15 +135,18 @@ def identify(
     elif case_type == "mortality":
         from clinical_review_agent.data.mortality import run_identify_mortality
         run_identify_mortality()
+    elif case_type == "psi":
+        from clinical_review_agent.data.psi import run_identify_psis
+        run_identify_psis()
     else:
-        raise typer.BadParameter(f"Unknown case type: {case_type}. Use 'readmission' or 'mortality'.")
+        raise typer.BadParameter(f"Unknown case type: {case_type}. Use 'readmission', 'mortality', or 'psi'.")
 
 
 @app.command()
 def review(
     limit: int = typer.Option(None, "--limit", "-n", help="Max number of cases to review"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print context for first case without calling API"),
-    case_type: str = typer.Option("readmission", "--type", "-t", help="Case type to review: readmission, mortality"),
+    case_type: str = typer.Option("readmission", "--type", "-t", help="Case type to review: readmission, mortality, psi"),
 ):
     """Run AI-powered clinical case reviews."""
     from clinical_review_agent.agent.reviewer import run_review

@@ -34,11 +34,13 @@ python main.py ingest --mimic-iv-bq --cohort-size 100 --include-radiology    # a
 
 python main.py identify                              # readmissions (default)
 python main.py identify --type mortality
+python main.py identify --type psi                   # AHRQ Patient Safety Indicators
 
 python main.py review --dry-run                      # preview context only
 python main.py review --limit N
 python main.py review --type mortality --dry-run
 python main.py review --type mortality --limit N
+python main.py review --type psi --limit N           # PSI documentation/coding-gap review
 
 python main.py analyze
 python main.py analyze --type readmission
@@ -60,7 +62,7 @@ cd /tmp/synthea && ./run_synthea -p 500 -a 50-90
 
 PostgreSQL (Railway-hosted in production, local in tests) is the shared contract between modules. `clinical_review_agent/schema.py` defines 10 tables and `get_connection()` returns an initialized psycopg connection with the `dict_row` factory. All modules import from `clinical_review_agent.*`. `DATABASE_URL` is required — `RuntimeError` if missing.
 
-**Pipeline:** `source adapter → ingest (parse + load) → identify (readmission | mortality) → review → analyze`
+**Pipeline:** `source adapter → ingest (parse + load) → identify (readmission | mortality | psi) → review → analyze`
 
 The package layout uses a flat-package convention (`clinical_review_agent/` at the project root, not `src/clinical_review_agent/`). Editable install via `pip install -e .` is wired through `[tool.hatch.build.targets.wheel] packages = ["clinical_review_agent"]` in `pyproject.toml`.
 
@@ -109,12 +111,15 @@ Registered resource types in `_PARSERS`: `Patient`, `Encounter`, `Condition`, `M
 
 - **`clinical_review_agent/data/mortality.py`** — Identifies inpatient mortality cases from discharge dispositions matching `expired`/`died`/`death`/`deceased`. Inserts into `mortality_cases` with a `lookback_days` value (`MORTALITY_LOOKBACK_DAYS`, default 90). Idempotent: clears existing mortality cases + their reviews before re-identifying.
 
+- **`clinical_review_agent/data/psi.py`** + **`clinical_review_agent/data/psi_definitions/`** — Identifies AHRQ Patient Safety Indicator (PSI) candidate cases. Each PSI is a subclass of `PsiDefinition` (see `psi_definitions/base.py`) registered in `psi_definitions/__init__.REGISTRY`. The engine bulk-fetches encounters/conditions/procedures, then evaluates each PSI per encounter; cases with a numerator hit are written to `psi_cases` with denominator/exclusion verdicts, exclusion reasons, and a POA imputation method. **POA strategy**: MIMIC-IV does not carry POA flags, so each PSI infers POA via prior-admission lookback — if the same code (or family) appeared in any earlier admission for the patient, the condition is likely POA. The review agent treats this as a hypothesis and overrides it from the discharge/radiology narrative. Currently registered: PSI 06 (iatrogenic pneumothorax), PSI 03 (pressure ulcer stage 3+), PSI 12 (perioperative VTE) — all per AHRQ QI v2024 prototype subsets. Code lists are *curated*, not exhaustive; production use should swap in the full AHRQ QI distribution.
+
 - **`clinical_review_agent/agent/context.py`** — Assembles clinical context dicts. Dispatches via `assemble_context(case_type, row, conn)` to type-specific builders. Readmission context: `patient_baseline`, `index_admission`, `interval_care`, `readmission`. Mortality context: `patient_baseline`, `death_encounter`, `prior_care`. Each encounter section includes `key_notes` (full text of discharge summaries + admission H&P-style physician notes) and `notes_index` (metadata-only list of all notes attached to that encounter — category, description, chartdate, charttime). Backwards-compatible: `assemble_context(row, conn)` still works for readmissions. `context_to_prompt_string()` serializes to JSON for the LLM.
 
-- **`clinical_review_agent/agent/reviewer.py`** — Sends the serialized context to Claude with a case-type-specific system prompt (`SYSTEM_PROMPTS` dict). Each prompt has a "How the Data is Structured" section telling the model to read `key_notes` first and use `notes_index` to flag missing documentation rather than invent narrative. Readmission and mortality have different clinical frameworks and `root_cause_category` enums:
+- **`clinical_review_agent/agent/reviewer.py`** — Sends the serialized context to Claude with a case-type-specific system prompt (`SYSTEM_PROMPTS` dict). Each prompt has a "How the Data is Structured" section telling the model to read `key_notes` first and use `notes_index` to flag missing documentation rather than invent narrative. The three case types each have different clinical frameworks and `root_cause_category` enums:
   - **Readmission categories:** `premature_discharge`, `inadequate_transition_planning`, `medication_related`, `inadequate_follow_up`, `disease_progression`, `social_determinants`, `patient_behavioral`, `unavoidable`, `other`.
   - **Mortality categories:** `diagnostic_error`, `treatment_delay`, `medication_error`, `system_failure`, `disease_progression`, `comorbidity_burden`, `communication_failure`, `unavoidable`, `other`.
-  Extracts structured JSON from ` ```json``` ` fences and narrative from the remainder. Stores in `reviews` table with `(case_type, case_id)` upsert + writes `output/reviews/{case_type}_{case_id}.{json,md}`. Exponential backoff on 429s. Model and retry params come from `clinical_review_agent/config.py`.
+  - **PSI categories:** `coding_gap`, `documentation_gap`, `poa_misclassification`, `true_event_preventable`, `true_event_unavoidable`, `engine_error`, `other`. The PSI prompt also requires a `case_classification` (true positive vs false positive subtype) and a `missing_codes` array — each missing code with the suggested ICD-10 value, evidence quote, and source note. This is the documentation-gap detection: the agent compares coded diagnoses to radiology/discharge narrative and identifies findings that should have been coded. Output files include `output/reviews/psi_<id>.{json,md}`.
+  Extracts structured JSON from ` ```json``` ` fences and narrative from the remainder. Stores in `reviews` table with `(case_type, case_id)` upsert + writes `output/reviews/{case_type}_{case_id}.{json,md}`. **Output files are written before the DB insert** so a transient Railway connection drop during the long Anthropic call doesn't lose the response; the DB write reconnects on `OperationalError`. Exponential backoff on 429s. Model and retry params come from `clinical_review_agent/config.py`.
 
 - **`clinical_review_agent/analytics/analyze.py`** — Cohort metrics + matplotlib PNGs to `output/analytics/` + `summary.json`. Must call `matplotlib.use('Agg')` before any other matplotlib import (headless rendering).
 
@@ -131,7 +136,9 @@ Registered resource types in `_PARSERS`: `Patient`, `Encounter`, `Condition`, `M
 - **MIMIC source auth:** `BQ_PROJECT_ID` env var picks the GCP billing project. The source builds its own `GoogleAuth` instance and overrides `quotaProjectId` on the credentials before constructing the BigQuery client — bypasses any stale `quota_project_id` in `~/.config/gcloud/application_default_credentials.json`.
 - **Model:** `CLAUDE_MODEL` env var (default `claude-sonnet-4-6`), wired through `clinical_review_agent/config.py`.
 - **`reviews.structured_json`** stores a JSON string parsed via `json.loads()`. Fields: `root_cause_category`, `preventability_score` (1-5), `preventability_rationale`, `contributing_factors[]`, `recommended_interventions[]`, `confidence_level`. The `root_cause_category` enum differs per case type.
-- **Multi-case-type architecture:** Adding a new case type requires (1) a case table in schema, (2) an identification module in `data/`, (3) a context builder branch in `agent/context.py`, (4) a system prompt in `agent/reviewer.py`'s `SYSTEM_PROMPTS`, (5) API endpoints in `server.py` if the web UI should surface it, and (6) a frontend page in `web/app/`.
+- **Multi-case-type architecture:** Adding a new case type requires (1) a case table in schema, (2) an identification module in `data/`, (3) a context builder branch in `agent/context.py`, (4) a system prompt in `agent/reviewer.py`'s `SYSTEM_PROMPTS` and an entry in `_CASE_QUERIES`, (5) API endpoints in `server.py` if the web UI should surface it, and (6) a frontend page in `web/app/`.
+
+- **PSI architecture:** Each PSI is a small subclass file in `clinical_review_agent/data/psi_definitions/`. Adding a new PSI is (1) write a `Psi<NN>` class with its `evaluate()` method, (2) register it in `psi_definitions/__init__.REGISTRY`. The engine handles encounter iteration, age computation, and prior-code lookup. Code lists in each definition are **curated subsets of AHRQ QI v2024**, marked with the spec version — not exhaustive. The PSI review agent reads radiology + discharge notes (via `_assemble_psi_context`'s wider `_PSI_KEY_NOTE_CATEGORIES = {"discharge summary", "radiology"}`) so it can flag findings that exist only in narrative but were never coded. **MIMIC-IV must be ingested with `--include-radiology`** for the documentation-gap detection to work; the default ingest skips radiology to save BigQuery scan cost.
 - **Notes ingestion (MIMIC):** Notes are emitted by `MimicBigQuerySource` (`mimiciii_notes.noteevents`) and `MimicIvBigQuerySource` (`mimiciv_note.discharge`, optionally `mimiciv_note.radiology` with `--include-radiology`) as a custom `Note` resource (not FHIR `DocumentReference`) and parsed into the `notes` table. The MIMIC-IV source maps `note_type` ('DS', 'RR') back to category strings ("Discharge summary", "Radiology") so the agent's `_is_key_note` filter picks them up. Only `Note` resources go to the notes table — FHIR sources don't currently emit them because real EHRs deliver narrative via C-CDA, which the agent doesn't yet consume.
 - **`MORTALITY_LOOKBACK_DAYS`** (default `90`) — days to look back for prior encounters when building mortality `prior_care`.
 - **Readmission identification** (configurable in `pairs.py`):
