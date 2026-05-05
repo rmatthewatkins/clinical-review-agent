@@ -2,9 +2,9 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { fetchApi, ReviewRow } from "@/lib/api";
+import { fetchApi, ReviewRow, PaginatedResponse } from "@/lib/api";
 
-type SortKey = "pair_id" | "age" | "preventability_score" | "root_cause" | "confidence" | "reviewed_at";
+type SortKey = "readmission_id" | "age" | "preventability_score" | "root_cause" | "confidence" | "reviewed_at";
 type SortDir = "asc" | "desc";
 
 function ScoreBadge({ score }: { score: number | null }) {
@@ -95,12 +95,12 @@ export default function Reviews() {
   const [maxScore, setMaxScore] = useState(5);
   const [confidence, setConfidence] = useState("All");
 
-  const [sortKey, setSortKey] = useState<SortKey>("pair_id");
+  const [sortKey, setSortKey] = useState<SortKey>("readmission_id");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
 
   useEffect(() => {
-    fetchApi<ReviewRow[]>("/api/reviews")
-      .then(setRows)
+    fetchApi<PaginatedResponse<ReviewRow> | ReviewRow[]>("/api/reviews?limit=200")
+      .then((res) => setRows(Array.isArray(res) ? res : res.items))
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   }, []);
@@ -233,7 +233,7 @@ export default function Reviews() {
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-[var(--border)] text-left text-xs text-[var(--muted)] uppercase tracking-wide">
-              <SortHeader label="Pair" sortKey="pair_id" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} />
+              <SortHeader label="Pair" sortKey="readmission_id" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} />
               <SortHeader label="Age" sortKey="age" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} />
               <th className="px-4 py-3">Gender</th>
               <th className="px-4 py-3">Index Diagnosis</th>
@@ -245,11 +245,16 @@ export default function Reviews() {
           </thead>
           <tbody>
             {filtered.map((r) => (
-              <tr key={r.pair_id} className="border-b border-[var(--border)] hover:bg-[var(--accent-light)]/50 transition-colors">
+              <tr key={`${r.case_type ?? "readmission"}-${r.readmission_id}`} className="border-b border-[var(--border)] hover:bg-[var(--accent-light)]/50 transition-colors">
                 <td className="px-4 py-3.5">
-                  <Link href={`/reviews/${r.pair_id}`} className="text-[var(--accent)] hover:underline font-medium">
-                    #{r.pair_id}
+                  <Link href={`/reviews/${r.case_type ?? "readmission"}/${r.case_id ?? r.readmission_id}`} className="text-[var(--accent)] hover:underline font-medium">
+                    #{r.case_id ?? r.readmission_id}
                   </Link>
+                  {r.case_type && r.case_type !== "readmission" && (
+                    <span className="ml-1.5 inline-flex items-center rounded-full bg-slate-100 text-slate-600 px-1.5 py-0.5 text-[10px] font-medium uppercase">
+                      {r.case_type}
+                    </span>
+                  )}
                 </td>
                 <td className="px-4 py-3.5">{r.age ?? "—"}</td>
                 <td className="px-4 py-3.5">{r.gender ?? "—"}</td>

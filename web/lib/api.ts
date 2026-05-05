@@ -15,12 +15,35 @@ export async function postApi<T>(path: string): Promise<T> {
   return res.json();
 }
 
-export interface RunReviewResult {
-  pair_id: number;
-  was_update: boolean;
-  root_cause_category: string | null;
-  preventability_score: number | null;
-  tokens_used: number;
+export interface JobSubmitResult {
+  job_id: string;
+  status: "pending";
+  case_type?: string;
+  case_id?: number;
+  readmission_id?: number;
+}
+
+export interface JobStatus {
+  job_id: string;
+  case_type?: string;
+  case_id?: number;
+  readmission_id?: number;
+  status: "pending" | "running" | "completed" | "failed";
+  result: {
+    root_cause_category: string | null;
+    preventability_score: number | null;
+    tokens_used: number;
+  } | null;
+  error: string | null;
+}
+
+// --- Pagination wrapper ---
+
+export interface PaginatedResponse<T> {
+  total: number;
+  offset: number;
+  limit: number;
+  items: T[];
 }
 
 // --- Types ---
@@ -28,15 +51,20 @@ export interface RunReviewResult {
 export interface Summary {
   patients: number;
   encounters: number;
-  pairs: number;
+  readmissions: number;
+  mortality_cases: number;
   reviews: number;
+  cases: { readmission: number; mortality: number };
+  reviews_by_type: { readmission: number; mortality: number };
   root_cause_distribution: Record<string, { count: number; percentage: number }>;
   preventability_score_distribution: Record<string, number>;
   mean_preventability_by_diagnosis: Record<string, number>;
 }
 
 export interface ReviewRow {
-  pair_id: number;
+  case_type?: string;
+  case_id?: number;
+  readmission_id: number;
   age: number | null;
   gender: string | null;
   index_diagnosis: string;
@@ -48,7 +76,7 @@ export interface ReviewRow {
 
 export interface ReviewDetail {
   context: {
-    pair_id: number;
+    readmission_id: number;
     days_between: number;
     patient_baseline: {
       patient_id: string;
@@ -104,8 +132,8 @@ export interface ReviewDetail {
   } | null;
 }
 
-export interface Pair {
-  pair_id: number;
+export interface Readmission {
+  readmission_id: number;
   patient_id: string;
   age: number | null;
   gender: string | null;
@@ -118,7 +146,28 @@ export interface Pair {
   readmit_start: string | null;
   readmit_end: string | null;
   readmit_diagnosis: string;
-  has_review: boolean;
+  review_status: "reviewed" | "pending";
+  root_cause: string | null;
+  preventability_score: number | null;
+  reviewed_at: string | null;
+}
+
+export interface MortalityCase {
+  case_id: number;
+  encounter_id: string;
+  patient_id: string;
+  death_date: string | null;
+  lookback_days: number;
+  age: number | null;
+  gender: string | null;
+  race: string | null;
+  city: string | null;
+  state: string | null;
+  encounter_start: string | null;
+  encounter_end: string | null;
+  diagnosis: string;
+  discharge_disposition: string | null;
+  review_status: "reviewed" | "pending";
   root_cause: string | null;
   preventability_score: number | null;
   reviewed_at: string | null;
@@ -132,29 +181,29 @@ export interface Analytics {
 export interface RootCauseRow {
   category: string;
   count: number;
-  pairs: Array<{ pair_id: number; preventability_score: number | null }>;
+  readmissions: Array<{ readmission_id: number; preventability_score: number | null }>;
 }
 
 export interface DiagnosisRow {
   diagnosis: string;
   count: number;
-  pairs: Array<{ pair_id: number; root_cause: string | null; preventability_score: number | null }>;
+  readmissions: Array<{ readmission_id: number; root_cause: string | null; preventability_score: number | null }>;
 }
 
 export interface GenderRow {
   gender: string;
   count: number;
-  pairs: Array<{ pair_id: number; root_cause: string | null; preventability_score: number | null }>;
+  readmissions: Array<{ readmission_id: number; root_cause: string | null; preventability_score: number | null }>;
 }
 
 export interface AgeGroupRow {
   age_group: string;
   count: number;
-  pairs: Array<{ pair_id: number; age: number | null; days_between: number }>;
+  readmissions: Array<{ readmission_id: number; age: number | null; days_between: number }>;
 }
 
 export interface DaysBetweenRow {
   bucket: string;
   count: number;
-  pairs: Array<{ pair_id: number; days_between: number }>;
+  readmissions: Array<{ readmission_id: number; days_between: number }>;
 }

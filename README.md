@@ -1,223 +1,308 @@
-# Readmission Review Agent
+# Clinical Review Agent
 
-An AI-powered clinical readmissions review agent that ingests FHIR patient data — from synthetic sources (Synthea) or production FHIR R4 servers (Epic, HAPI) — to identify and assess 30-day hospital readmissions. Uses Claude as a simulated hospitalist to perform structured peer reviews with root cause analysis, preventability scoring, and intervention recommendations.
+An AI-powered clinical peer-review agent that ingests patient data from synthetic sources (Synthea), production FHIR R4 servers (Epic, HAPI), or MIMIC-III on BigQuery, then identifies and reviews specific case types — currently 30-day hospital readmissions and inpatient mortality. Uses Claude as a simulated hospitalist to perform structured peer reviews with root cause analysis, preventability scoring, and intervention recommendations.
 
 ## Architecture
 
 ```
-src/
-├── schema.py                # Shared PostgreSQL schema (9 tables) — the contract between all modules
+clinical_review_agent/           Python package
+├── schema.py                    PostgreSQL schema (10 tables) — the contract between modules
+├── config.py                    Centralized env-driven settings
+├── logging_config.py            Structured JSON / text logging
 ├── data/
-│   ├── sources/             # Pluggable FHIR data source adapters
-│   │   ├── base.py          # FhirSource protocol + shared FHIR parsing helpers
-│   │   ├── synthea_file.py  # File-based source (Synthea Bundle JSONs)
-│   │   └── fhir_api.py      # FHIR R4 REST API client (Epic, HAPI, etc.)
-│   ├── ingest.py            # Source-agnostic FHIR parser → PostgreSQL
-│   └── pairs.py             # 30-day readmission pair identifier (filters planned readmissions)
+│   ├── ingest.py                Source-agnostic resource parser → PostgreSQL
+│   ├── pairs.py                 30-day readmission identifier (planned-readmit + transfer filters)
+│   ├── mortality.py             Inpatient mortality identifier (death-disposition match)
+│   └── sources/
+│       ├── base.py              FhirSource protocol + shared FHIR parsing helpers
+│       ├── synthea_file.py      File-based source (Synthea Bundle JSONs)
+│       ├── fhir_api.py          FHIR R4 REST API client (Epic, HAPI, etc.)
+│       └── mimic_bq.py          MIMIC-III via BigQuery (physionet-data) → FHIR + Note dicts
 ├── agent/
-│   ├── context.py           # Clinical context assembler from DB
-│   └── reviewer.py          # Claude API integration + structured peer review
+│   ├── context.py               Clinical context assembler (per case type)
+│   └── reviewer.py              Anthropic API call + structured peer review
 └── analytics/
-    └── analyze.py           # Cohort-level analytics + matplotlib visualizations
+    └── analyze.py               Cohort metrics + matplotlib visualizations
 
-server.py                    # FastAPI REST API backend (port 8000)
-web/                         # Next.js + TypeScript + Tailwind frontend (port 3000)
+main.py                          Typer CLI entry point
+server.py                        FastAPI REST API (port 8000)
+tests/                           Pytest suite
+web/                             Next.js + TypeScript + Tailwind frontend (port 3000)
 ├── app/
-│   ├── page.tsx             # Dashboard — summary metrics, charts, quick links
-│   ├── readmissions/        # All readmission pairs with review status
-│   ├── reviews/             # Completed reviews list + detail view with AI review trigger
-│   └── analytics/           # Multi-dimension analytics (root cause, diagnosis, gender, age, etc.)
-└── lib/api.ts               # API client + TypeScript types
+│   ├── page.tsx                 Dashboard
+│   ├── readmissions/            Readmission case list
+│   ├── mortality/               Mortality case list
+│   ├── reviews/                 Reviews list + detail (with "Run AI Review" trigger)
+│   └── analytics/               Cohort analytics
+└── lib/api.ts                   API client + TypeScript types
 ```
 
 ### Pipeline
 
 ```
-FHIR Source (files or API) → ingest → PostgreSQL → identify-pairs → review (Claude) → analyze
+Source (Synthea | FHIR R4 API | MIMIC-III BigQuery)
+   ↓ ingest      (parse + load to PostgreSQL)
+   ↓ identify    (readmission pairs OR mortality cases)
+   ↓ review      (Claude assembles context, scores, narrates)
+   ↓ analyze     (cohort metrics + charts)
 ```
 
-1. **Ingest** accepts any FHIR data source — Synthea JSON files on disk or a FHIR R4 REST API (Epic, HAPI) — and normalizes resources (Patient, Encounter, Condition, MedicationRequest, Observation, Procedure, CarePlan) into PostgreSQL (hosted on Railway).
-2. **Identify Pairs** finds inpatient encounters followed by another inpatient encounter for the same patient within 30 days of discharge. Planned readmissions (e.g., recurring chemotherapy cycles with identical reason codes) are automatically filtered out.
-3. **Review** assembles a clinical context package for each pair — index admission details, interval care, readmission presentation, and patient baseline — then sends it to Claude for structured peer review.
-4. **Analyze** computes cohort-level metrics across completed reviews and generates visualizations.
+The `FhirSource` protocol (`iter_resources() -> Iterator[dict]`) lets every downstream stage stay source-agnostic. Synthea and the FHIR API client emit FHIR R4 resource dicts directly. The MIMIC-III source emits FHIR-shaped dicts plus a custom `Note` resourceType for free-text narrative — FHIR R4 doesn't carry note text (that travels via C-CDA in real EHR integrations); MIMIC hands it to us via `mimiciii_notes.noteevents`.
 
 ## Prerequisites
 
 - Python 3.11+
 - Node.js 18+ (for the web UI)
-- Java (for running Synthea)
-- An Anthropic API key
+- A PostgreSQL instance (Railway hosted, or local — `DATABASE_URL` env var)
+- An Anthropic API key (`ANTHROPIC_API_KEY` env var)
+- For Synthea source: Java (to run Synthea)
+- For MIMIC-III source: a GCP project with BigQuery enabled, `gcloud auth application-default login` set up, and PhysioNet credentialed access to MIMIC-III
 
 ## Setup
 
 ```bash
-# Clone the repo
-git clone <repo-url> && cd readmission-review-agent
+git clone https://github.com/rmatthewatkins/clinical-review-agent.git
+cd clinical-review-agent
 
-# Create virtual environment and install Python dependencies
+# Python — editable install with all extras
 python3 -m venv .venv
 source .venv/bin/activate
-pip install typer anthropic matplotlib rich httpx "psycopg[binary]" fastapi "uvicorn[standard]"
+pip install -e ".[dev,mimic]"
 
-# Install dev dependencies for testing
-pip install pytest pytest-cov
-
-# Install frontend dependencies
+# Frontend
 cd web && npm install && cd ..
 
-# Set your API key and database URL
-echo 'ANTHROPIC_API_KEY=sk-ant-...' >> .env
-echo 'DATABASE_URL=postgresql://...' >> .env
+# Required env vars
+cp .env.example .env
+# then edit .env to set ANTHROPIC_API_KEY and DATABASE_URL
 ```
 
-## Generating Synthetic Data
+`pip install -e ".[mimic]"` adds `google-cloud-bigquery`. Skip this extra if you only need the Synthea/FHIR-API sources. `pip install -e ".[dev]"` adds the test runner.
 
-This project uses [Synthea](https://github.com/synthetichealth/synthea) to generate realistic synthetic FHIR patient data. Synthea is a Java application that must be downloaded and run separately.
+## Data sources
+
+### A. Synthea (synthetic FHIR)
 
 ```bash
-# Clone and build Synthea
+# Build Synthea
 git clone https://github.com/synthetichealth/synthea.git /tmp/synthea
-cd /tmp/synthea
-./gradlew build check -x test
+cd /tmp/synthea && ./gradlew build check -x test
 
-# Generate patients — use -a 50-90 for older patients with more inpatient encounters
+# Generate older patients — they have more inpatient encounters
 ./run_synthea -p 500 -a 50-90
 
-# Output will be in /tmp/synthea/output/fhir/
+# Output: /tmp/synthea/output/fhir/*.json
 ```
 
-Younger populations generate very few inpatient encounters. For meaningful readmission analysis, generate at least 500 patients in the 50-90 age range.
+Younger Synthea cohorts produce too few inpatient encounters to drive readmission analysis. 500 patients aged 50–90 is the recommended starting set.
+
+### B. FHIR R4 server (Epic, HAPI, etc.)
+
+Any FHIR R4 endpoint with `Patient`, `Encounter`, `Condition`, `MedicationRequest`, `Observation`, and `Procedure` support. Bearer-token auth via `--token` or `FHIR_TOKEN` env var.
+
+### C. MIMIC-III via BigQuery
+
+Reads directly from `physionet-data.mimiciii_clinical` and `physionet-data.mimiciii_notes` (PhysioNet credentialed). The source translates MIMIC tables into FHIR R4 dicts plus custom `Note` resources. Resource ids are namespaced `m3-p<subject_id>`, `m3-a<hadm_id>`, `m3-note-<row_id>`, etc., so they survive a roundtrip and can deep-link into a separate chart-browser if you have one.
+
+Requires `BQ_PROJECT_ID` env var pointing at a GCP project that can be billed for queries (the dataset itself is public; the project handles billing). Note: if your global ADC has a `quota_project_id` set to a different project the active account can't bill, you'll get `USER_PROJECT_DENIED`. The source overrides this programmatically — see `clinical_review_agent/data/sources/mimic_bq.py`.
+
+**DUA notice:** MIMIC-III is restricted under the PhysioNet Credentialed Health Data Use Agreement v1.5. Single credentialed user only; no public deployment of MIMIC-loaded systems; outputs (`output/reviews/*`) are also restricted data. Use a dedicated Postgres database for MIMIC ingest — don't co-mingle with Synthea data.
 
 ## Usage
 
-Source your `.env` file before running commands that call the Claude API:
-
 ```bash
 source .venv/bin/activate
-set -a && source .env && set +a
+set -a && source .env && set +a   # or .env.mimic for the MIMIC database
 ```
 
-### 1. Ingest FHIR data
+### 1. Ingest
 
 ```bash
-# From Synthea files on disk
+# Synthea files
 python main.py ingest --dir /tmp/synthea/output/fhir
 
-# From a FHIR R4 server (e.g., HAPI, Epic)
+# FHIR R4 server
 python main.py ingest --fhir-url http://localhost:8080/fhir
-python main.py ingest --fhir-url https://fhir.epic.com/.../R4 --token "$FHIR_TOKEN"
+python main.py ingest --fhir-url https://fhir.example.com/R4 --token "$FHIR_TOKEN"
+
+# MIMIC-III BigQuery
+python main.py ingest --mimic-bq --bq-project mimic-iii-exploration \
+  --cohort-size 100 --cohort-strategy readmit \
+  --include-labs --include-notes
+
+# Selective backfill (only re-fetch one resource type for an existing cohort)
+python main.py ingest --mimic-bq --cohort-size 100 --only Note
 ```
 
-Normalizes FHIR resources and loads them into PostgreSQL. The FHIR API client handles pagination, auth, and rate limiting automatically.
+`--cohort-strategy` choices for the MIMIC source: `readmit` (patients with ≥1 candidate 30-day readmit), `high-acuity` (patients with the most admissions), `random` (deterministic shuffle). Default `readmit`.
 
-### 2. Identify readmission pairs
+`--only` overrides the include flags and emits only the listed resource type(s) — useful when you've already ingested the heavy tables and want to backfill notes (or any single resource) without re-scanning everything.
+
+`--dry-run` on `ingest` iterates the source and prints resourceType counts + a sample dict per type without writing to PostgreSQL — great for verifying BQ access and translation shape before committing to a full ingest.
+
+### 2. Identify cases
 
 ```bash
-python main.py identify-pairs
+python main.py identify                       # readmissions (default)
+python main.py identify --type mortality      # inpatient mortality
 ```
 
-Finds all 30-day inpatient readmission pairs. Automatically excludes planned readmissions (encounters with identical reason codes, such as scheduled chemotherapy cycles).
+**Readmissions:** finds inpatient encounters followed by another inpatient encounter for the same patient within `READMISSION_WINDOW_DAYS` (default 30). Filters out:
+- Transfers (gap ≤ `READMISSION_MIN_DAYS`, default 2)
+- Encounters discharged to SNF / rehab / hospice / LTAC / cancer-transfer
+- Planned surgical follow-ups (description matches `history of`, `aftercare`, etc.)
+- Same-`reason_code` pairs (recurring chemo, dialysis, etc.)
 
-### 3. Run AI reviews
+**Mortality:** finds inpatient encounters with discharge dispositions matching `expired`, `died`, `death`, `deceased`. Each case stores a configurable lookback window (`MORTALITY_LOOKBACK_DAYS`, default 90 days) used by the context builder to summarize prior care.
+
+Both commands are idempotent — they DELETE existing rows of their case type and re-identify.
+
+### 3. Review
 
 ```bash
-# Preview the assembled context for the first unreviewed pair (no API call)
-python main.py review --dry-run
+python main.py review --dry-run                   # preview context, no API call
+python main.py review --limit 10                  # review next 10 unreviewed readmissions
+python main.py review                             # review all unreviewed readmissions
 
-# Review a specific number of pairs
-python main.py review --limit 10
-
-# Review all remaining pairs
-python main.py review
+python main.py review --type mortality --dry-run  # preview a mortality context
+python main.py review --type mortality --limit 5  # review 5 mortality cases
 ```
 
 Each review produces:
-- **Structured JSON** — root cause category, preventability score (1-5), contributing factors, recommended interventions, confidence level
-- **Clinical narrative** — 2-3 paragraph physician-style prose review
+- **Structured JSON** — `root_cause_category`, `preventability_score` (1-5), `preventability_rationale`, `contributing_factors`, `recommended_interventions`, `confidence_level`. Stored in `reviews.structured_json`.
+- **Clinical narrative** — 2-3 paragraph M&M-style prose. Stored in `reviews.clinical_narrative`.
 
-Results are stored in PostgreSQL and written to `output/reviews/` as individual `.json` and `.md` files.
+Outputs land in PostgreSQL (`reviews` table, upsert keyed on `(case_type, case_id)`) and as `output/reviews/{case_type}_{case_id}.{json,md}` files. The MD files are restricted data when produced from MIMIC ingest — handle accordingly.
 
-### 4. Generate analytics
+The clinical context payload includes:
+- `patient_baseline` (demographics, chronic conditions, baseline meds, recent observations)
+- The case-type-specific encounter (`index_admission` + `interval_care` + `readmission` for readmits; `death_encounter` + `prior_care` for mortality)
+- For each encounter, **`key_notes`** (full text of discharge summaries + admission H&P notes when present) and **`notes_index`** (metadata-only list of all other notes for that encounter — category, description, date)
+
+The system prompt explicitly instructs Claude to read `key_notes` first and to use `notes_index` to flag missing documentation rather than invent narrative.
+
+### 4. Analyze
 
 ```bash
-python main.py analyze
+python main.py analyze                       # all case types
+python main.py analyze --type readmission    # readmissions only
+python main.py analyze --type mortality      # mortality only
 ```
 
-Produces cohort-level analysis in `output/analytics/`:
-- `root_cause_distribution.png` — distribution of root cause categories
-- `preventability_by_diagnosis.png` — mean preventability score by diagnosis group
-- `contributing_factors.png` — most common contributing factors
-- `recommended_interventions.png` — most common recommended interventions
-- `preventability_histogram.png` — preventability score distribution (1-5)
+Produces `output/analytics/`:
+- `root_cause_distribution.png` — root-cause category counts
+- `preventability_by_diagnosis.png` — mean preventability per diagnosis
+- `contributing_factors.png` / `recommended_interventions.png` — top phrases
+- `preventability_histogram.png` — score distribution (1-5)
 - `summary.json` — all computed metrics
 
-### 5. Start the web UI
+### 5. Web UI
 
 ```bash
-# Terminal 1 — FastAPI backend
+# Terminal 1
 set -a && source .env && set +a
-python server.py                    # http://localhost:8000
+python server.py        # FastAPI on http://localhost:8000
 
-# Terminal 2 — Next.js frontend
-cd web && npm run dev               # http://localhost:3000
+# Terminal 2
+cd web && npm run dev   # Next.js on http://localhost:3000
 ```
 
-The web UI provides:
-- **Dashboard** — Summary metrics (patients, encounters, pairs, reviews), root cause distribution, preventability charts, quick navigation links
-- **Readmissions** — All identified readmission pairs with patient demographics, encounter details, and review status (Reviewed/Pending). Sortable and searchable.
-- **Reviews** — Completed reviews with colored preventability badges, root cause pills, and confidence indicators. Click any review to see the full detail.
-- **Review Detail** — Two-column deep-dive: clinical context (left) and AI review (right). Includes a **"Run AI Review"** button to trigger Claude review directly from the browser.
-- **Analytics** — Multi-dimension analysis across 7 tabs: by root cause, diagnosis, gender, age group, days to readmission, contributing factors, and recommended interventions.
+Pages:
+- **Dashboard** — patient/encounter/case/review counts, root cause distribution, preventability charts, quick links
+- **Readmissions** — readmission pair list with patient demographics, encounter details, review status
+- **Mortality** — mortality case list with death disposition + lookback details
+- **Reviews** — completed reviews with preventability badges, root-cause pills, confidence indicators; filterable by `case_type`
+- **Review Detail** — two-column view: clinical context (left) + AI assessment + narrative (right). "Run AI Review" button triggers a Claude review on Pending cases (rate-limited).
+- **Analytics** — multi-dimension drill-down across root cause, diagnosis, gender, age group, days to readmission, factors, interventions
 
-## Review Schema
+## Database schema
 
-Each AI review produces a structured assessment with these fields:
+10 tables (`clinical_review_agent/schema.py`):
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `root_cause_category` | enum | `premature_discharge`, `inadequate_transition_planning`, `medication_related`, `inadequate_follow_up`, `disease_progression`, `social_determinants`, `patient_behavioral`, `unavoidable`, `other` |
-| `preventability_score` | 1-5 | 1 = clearly not preventable, 5 = clearly preventable |
-| `preventability_rationale` | string | Evidence-based explanation of the score |
-| `contributing_factors` | string[] | Specific factors that contributed to readmission |
-| `recommended_interventions` | string[] | Actionable interventions to prevent similar readmissions |
-| `confidence_level` | enum | `high`, `moderate`, `low` |
+| Table | Purpose |
+|---|---|
+| `patients` | demographics, location, race/ethnicity |
+| `encounters` | type (`inpatient` / `ambulatory` / `emergency`), period, reason, discharge disposition |
+| `conditions` | diagnoses with onset/abatement and clinical status |
+| `medications` | prescriptions / medication requests with status and dates |
+| `observations` | lab values, vitals, screening scores |
+| `procedures` | performed procedures with dates |
+| `care_plans` | active care plans with status |
+| `notes` | free-text narrative (category, description, chartdate, charttime, full text) — MIMIC-only at present |
+| `readmissions` | identified index → readmission encounter pairs with `days_between` |
+| `mortality_cases` | identified inpatient deaths with `death_date` and `lookback_days` |
+| `reviews` | AI assessments, polymorphic via `(case_type, case_id)` unique index |
 
-## Database Schema
+`SCHEMA_SQL` is idempotent (`CREATE TABLE IF NOT EXISTS`); `MIGRATION_SQL` upgrades older deployments (renames `readmission_pairs → readmissions`, adds `case_type`/`case_id` to `reviews`, etc.) and is safe on fresh databases.
 
-The PostgreSQL database (hosted on Railway) contains 9 tables:
+## Review schemas
 
-- **patients** — demographics, location, race/ethnicity
-- **encounters** — type, dates, reason, discharge disposition
-- **conditions** — diagnoses with onset/abatement and clinical status
-- **medications** — prescriptions with status and dates
-- **observations** — lab values, vitals, screening scores
-- **procedures** — performed procedures with dates
-- **care_plans** — active care plans with status
-- **readmission_pairs** — identified index → readmission encounter pairs with days between
-- **reviews** — AI-generated structured reviews and clinical narratives
+### Readmission
+
+| Field | Values |
+|---|---|
+| `root_cause_category` | `premature_discharge`, `inadequate_transition_planning`, `medication_related`, `inadequate_follow_up`, `disease_progression`, `social_determinants`, `patient_behavioral`, `unavoidable`, `other` |
+| `preventability_score` | 1 (clearly not preventable) – 5 (clearly preventable) |
+| `confidence_level` | `high`, `moderate`, `low` |
+
+### Mortality
+
+| Field | Values |
+|---|---|
+| `root_cause_category` | `diagnostic_error`, `treatment_delay`, `medication_error`, `system_failure`, `disease_progression`, `comorbidity_burden`, `communication_failure`, `unavoidable`, `other` |
+| `preventability_score` | 1–5 (same anchors) |
+| `confidence_level` | `high`, `moderate`, `low` |
+
+Both share the prose-narrative output and the `contributing_factors` / `recommended_interventions` arrays.
 
 ## Testing
 
 ```bash
 python -m pytest tests/ -v
+python -m pytest tests/test_data.py -v          # ingest + readmission identifier
+python -m pytest tests/test_mortality.py -v     # mortality identifier + context
+python -m pytest tests/test_agent.py -v         # context assembly + response parsing
+python -m pytest tests/test_sources.py -v       # source adapters (Synthea + Epic compat)
+python -m pytest tests/test_analytics.py -v     # analytics + chart generation
+python -m pytest tests/test_server.py -v        # FastAPI endpoints
 ```
 
-Tests cover:
-- FHIR bundle parsing and PostgreSQL loading (`test_data.py`)
-- Readmission pair identification with edge cases (`test_data.py`)
-- Clinical context assembly (`test_agent.py`)
-- Claude response parsing (`test_agent.py`)
-- Analytics computations and visualization generation (`test_analytics.py`)
+Tests default to `postgresql://localhost/readmissions_test` (override with `TEST_DATABASE_URL`). They never touch the production Railway DB — `conftest.py` enforces this.
 
 ## Configuration
 
-| Setting | Location | Default |
-|---------|----------|---------|
-| Claude model | `src/agent/reviewer.py` | `claude-sonnet-4-6` |
-| Database URL | `src/schema.py` | `DATABASE_URL` env var (Railway PostgreSQL) |
-| Review output | `src/agent/reviewer.py` | `output/reviews/` |
-| Analytics output | `src/analytics/analyze.py` | `output/analytics/` |
-| Readmission window | `src/data/pairs.py` | 30 days |
-| API retry (max) | `src/agent/reviewer.py` | 5 retries, exponential backoff |
-| FHIR API page size | `src/data/sources/fhir_api.py` | 100 (`_count`) |
-| FHIR token env var | `main.py` | `FHIR_TOKEN` |
+All settings load from environment variables via `clinical_review_agent/config.py:get_settings()`. Defaults are sensible for local development.
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `DATABASE_URL` | (required) | PostgreSQL connection string |
+| `ANTHROPIC_API_KEY` | (required for review) | Claude API key |
+| `CLAUDE_MODEL` | `claude-sonnet-4-6` | Anthropic model |
+| `CLAUDE_MAX_TOKENS` | `4096` | Output cap per review |
+| `CLAUDE_MAX_RETRIES` | `5` | Retry count on 429 |
+| `READMISSION_WINDOW_DAYS` | `30` | Max gap between discharge and readmit |
+| `READMISSION_MIN_DAYS` | `2` | Below this is treated as a transfer |
+| `READMISSION_EXCLUDE_TRANSFER_DISPOSITIONS` | `true` | Skip SNF/Rehab/Hospice/LTAC/etc. |
+| `READMISSION_EXCLUDE_SURGICAL_FOLLOWUP` | `true` | Skip "history of"/"aftercare"/etc. |
+| `MORTALITY_LOOKBACK_DAYS` | `90` | Window for mortality `prior_care` |
+| `BQ_PROJECT_ID` | (required for `--mimic-bq`) | GCP billing project for BigQuery |
+| `MIMIC_COHORT_SIZE` | `100` | Default cohort size for MIMIC source |
+| `MIMIC_COHORT_STRATEGY` | `readmit` | `readmit` / `high-acuity` / `random` |
+| `FHIR_TOKEN` | — | Bearer token for `--fhir-url` |
+| `FHIR_PAGE_SIZE` | `100` | FHIR API `_count` |
+| `CORS_ORIGINS` | `http://localhost:3000` | Comma-separated allowlist |
+| `SERVER_HOST` / `SERVER_PORT` | `0.0.0.0` / `8000` | FastAPI bind |
+| `DB_POOL_MIN_SIZE` / `DB_POOL_MAX_SIZE` | `2` / `10` | psycopg pool |
+| `REVIEW_RATE_LIMIT` | `10` | Reviews per minute via API |
+| `LOG_LEVEL` / `LOG_FORMAT` | `INFO` / `json` | Logging |
+
+See `.env.example` for the full list.
+
+## Docker
+
+```bash
+docker compose up           # db + api + web
+docker compose up db        # just the database
+```
+
+The included `docker-compose.yml` provisions a local Postgres (port 5432), the FastAPI backend, and the Next.js frontend. Use this for self-contained local development; for production / personal Railway-backed runs, use the venv flow above.

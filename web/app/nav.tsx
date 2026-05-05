@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 const navItems = [
   { href: "/", label: "Dashboard" },
   { href: "/readmissions", label: "Readmissions" },
+  { href: "/mortality", label: "Mortality" },
   { href: "/reviews", label: "Reviews" },
   { href: "/analytics", label: "Analytics" },
 ];
@@ -15,7 +16,7 @@ export default function Nav() {
 
   return (
     <nav className="border-b border-[var(--border)] bg-[var(--card)] px-6 py-3 flex items-center gap-8">
-      <span className="font-bold text-lg">Readmissions Agent</span>
+      <span className="font-bold text-lg">Clinical Review Agent</span>
       {navItems.map((item) => {
         const isActive =
           item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);

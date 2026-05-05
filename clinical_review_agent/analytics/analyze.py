@@ -12,7 +12,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-from src.schema import get_connection  # noqa: E402
+from clinical_review_agent.schema import get_connection  # noqa: E402
 
 OUTPUT_DIR = Path(__file__).parent.parent.parent / "output" / "analytics"
 
@@ -21,12 +21,22 @@ OUTPUT_DIR = Path(__file__).parent.parent.parent / "output" / "analytics"
 # Query helpers
 # ---------------------------------------------------------------------------
 
-def _fetch_reviews(conn) -> list[dict]:
-    """Return all reviews with their parsed structured_json."""
-    rows = conn.execute(
-        "SELECT id, pair_id, structured_json, clinical_narrative, "
-        "model_used, created_at, tokens_used FROM reviews"
-    ).fetchall()
+def _fetch_reviews(conn, case_type: str | None = None) -> list[dict]:
+    """Return all reviews with their parsed structured_json.
+
+    If *case_type* is provided, only reviews of that type are returned.
+    """
+    if case_type:
+        rows = conn.execute(
+            "SELECT id, case_type, case_id, readmission_id, structured_json, clinical_narrative, "
+            "model_used, created_at, tokens_used FROM reviews WHERE case_type = %s",
+            (case_type,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id, case_type, case_id, readmission_id, structured_json, clinical_narrative, "
+            "model_used, created_at, tokens_used FROM reviews"
+        ).fetchall()
     results = []
     for row in rows:
         rec = dict(row)
@@ -34,22 +44,25 @@ def _fetch_reviews(conn) -> list[dict]:
             rec["parsed"] = json.loads(rec["structured_json"])
         else:
             rec["parsed"] = {}
+        # Ensure readmission_id is available for backwards compat
+        if not rec.get("readmission_id"):
+            rec["readmission_id"] = rec.get("case_id")
         results.append(rec)
     return results
 
 
-def _fetch_diagnosis_for_pair(conn, pair_id: int) -> str | None:
+def _fetch_diagnosis_for_readmission(conn, readmission_id: int) -> str | None:
     """Get the primary diagnosis display for the index encounter of a pair."""
     row = conn.execute(
         """
         SELECT c.display
-        FROM readmission_pairs rp
+        FROM readmissions rp
         JOIN conditions c ON c.encounter_id = rp.index_encounter_id
         WHERE rp.id = %s
         ORDER BY c.onset ASC
         LIMIT 1
         """,
-        (pair_id,),
+        (readmission_id,),
     ).fetchone()
     return row["display"] if row else None
 
@@ -80,7 +93,7 @@ def mean_preventability_by_diagnosis(
         score = r["parsed"].get("preventability_score")
         if score is None:
             continue
-        diag = _fetch_diagnosis_for_pair(conn, r["pair_id"])
+        diag = _fetch_diagnosis_for_readmission(conn, r["readmission_id"])
         if diag is None:
             diag = "Unknown"
         diag_scores.setdefault(diag, []).append(float(score))
@@ -259,7 +272,7 @@ def build_summary(
 # Entrypoint
 # ---------------------------------------------------------------------------
 
-def run_analyze(database_url: str | Path | None = None, output_dir: Path | None = None) -> None:
+def run_analyze(database_url: str | Path | None = None, output_dir: Path | None = None, case_type: str | None = None) -> None:
     """Run all analytics, generate visualizations, write summary JSON, print console table."""
     from rich.console import Console
     from rich.table import Table
@@ -269,7 +282,7 @@ def run_analyze(database_url: str | Path | None = None, output_dir: Path | None 
     out = output_dir or OUTPUT_DIR
     out.mkdir(parents=True, exist_ok=True)
 
-    reviews = _fetch_reviews(conn)
+    reviews = _fetch_reviews(conn, case_type=case_type)
 
     if not reviews:
         console.print(

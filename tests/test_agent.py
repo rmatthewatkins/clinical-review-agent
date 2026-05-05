@@ -5,9 +5,9 @@ from datetime import date
 
 import pytest
 
-from src.agent.context import assemble_context, context_to_prompt_string, _compute_age
-from src.agent.reviewer import _parse_response
-from src.schema import get_connection
+from clinical_review_agent.agent.context import assemble_context, context_to_prompt_string, _compute_age
+from clinical_review_agent.agent.reviewer import _parse_response
+from clinical_review_agent.schema import get_connection
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────
@@ -117,9 +117,9 @@ def db(db_conn):
         ("O003", "P001", "E003", "85354-9", "Blood pressure systolic", "172", "mmHg", "2025-01-28"),
     )
 
-    # Readmission pair
+    # Readmission
     conn.execute(
-        "INSERT INTO readmission_pairs (id, index_encounter_id, readmission_encounter_id, days_between, patient_id) "
+        "INSERT INTO readmissions (id, index_encounter_id, readmission_encounter_id, days_between, patient_id) "
         "VALUES (%s, %s, %s, %s, %s)",
         (1, "E001", "E003", 14, "P001"),
     )
@@ -133,9 +133,9 @@ def db(db_conn):
 
 class TestContextAssembly:
     def test_context_has_required_top_level_keys(self, db):
-        pair = db.execute("SELECT * FROM readmission_pairs WHERE id = 1").fetchone()
-        ctx = assemble_context(pair, db)
-        assert "pair_id" in ctx
+        row = db.execute("SELECT * FROM readmissions WHERE id = 1").fetchone()
+        ctx = assemble_context(row, db)
+        assert "readmission_id" in ctx
         assert "days_between" in ctx
         assert "patient_baseline" in ctx
         assert "index_admission" in ctx
@@ -143,8 +143,8 @@ class TestContextAssembly:
         assert "readmission" in ctx
 
     def test_patient_baseline(self, db):
-        pair = db.execute("SELECT * FROM readmission_pairs WHERE id = 1").fetchone()
-        ctx = assemble_context(pair, db)
+        row = db.execute("SELECT * FROM readmissions WHERE id = 1").fetchone()
+        ctx = assemble_context(row, db)
         baseline = ctx["patient_baseline"]
 
         assert baseline["patient_id"] == "P001"
@@ -157,8 +157,8 @@ class TestContextAssembly:
         assert len(baseline["active_medications"]) >= 2  # Furosemide + Lisinopril
 
     def test_index_admission(self, db):
-        pair = db.execute("SELECT * FROM readmission_pairs WHERE id = 1").fetchone()
-        ctx = assemble_context(pair, db)
+        row = db.execute("SELECT * FROM readmissions WHERE id = 1").fetchone()
+        ctx = assemble_context(row, db)
         idx = ctx["index_admission"]
 
         assert idx["encounter_id"] == "E001"
@@ -173,8 +173,8 @@ class TestContextAssembly:
         assert len(idx["observations"]) >= 2
 
     def test_interval_care(self, db):
-        pair = db.execute("SELECT * FROM readmission_pairs WHERE id = 1").fetchone()
-        ctx = assemble_context(pair, db)
+        row = db.execute("SELECT * FROM readmissions WHERE id = 1").fetchone()
+        ctx = assemble_context(row, db)
         interval = ctx["interval_care"]
 
         assert len(interval["encounters"]) >= 1
@@ -185,8 +185,8 @@ class TestContextAssembly:
         assert any("diabetes" in c["display"].lower() for c in interval["new_conditions_diagnosed"])
 
     def test_readmission(self, db):
-        pair = db.execute("SELECT * FROM readmission_pairs WHERE id = 1").fetchone()
-        ctx = assemble_context(pair, db)
+        row = db.execute("SELECT * FROM readmissions WHERE id = 1").fetchone()
+        ctx = assemble_context(row, db)
         readmit = ctx["readmission"]
 
         assert readmit["encounter_id"] == "E003"
@@ -196,18 +196,18 @@ class TestContextAssembly:
         assert len(readmit["observations"]) >= 1
 
     def test_days_between(self, db):
-        pair = db.execute("SELECT * FROM readmission_pairs WHERE id = 1").fetchone()
-        ctx = assemble_context(pair, db)
+        row = db.execute("SELECT * FROM readmissions WHERE id = 1").fetchone()
+        ctx = assemble_context(row, db)
         assert ctx["days_between"] == 14
 
     def test_context_serializable(self, db):
-        pair = db.execute("SELECT * FROM readmission_pairs WHERE id = 1").fetchone()
-        ctx = assemble_context(pair, db)
+        row = db.execute("SELECT * FROM readmissions WHERE id = 1").fetchone()
+        ctx = assemble_context(row, db)
         prompt = context_to_prompt_string(ctx)
         assert isinstance(prompt, str)
         # Should be valid JSON
         parsed = json.loads(prompt)
-        assert parsed["pair_id"] == 1
+        assert parsed["readmission_id"] == 1
 
 
 class TestComputeAge:

@@ -2,9 +2,9 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { fetchApi, Readmission, PaginatedResponse } from "@/lib/api";
+import { fetchApi, MortalityCase, PaginatedResponse } from "@/lib/api";
 
-type SortKey = "readmission_id" | "age" | "index_diagnosis" | "index_start" | "days_between" | "readmit_diagnosis" | "review_status";
+type SortKey = "case_id" | "age" | "diagnosis" | "death_date" | "review_status";
 type SortDir = "asc" | "desc";
 
 function StatusBadge({ reviewed }: { reviewed: boolean }) {
@@ -59,18 +59,18 @@ function StatCard({ label, value }: { label: string; value: string | number }) {
   );
 }
 
-export default function ReadmissionsPage() {
-  const [rows, setRows] = useState<Readmission[]>([]);
+export default function MortalityPage() {
+  const [rows, setRows] = useState<MortalityCase[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
 
-  const [sortKey, setSortKey] = useState<SortKey>("readmission_id");
+  const [sortKey, setSortKey] = useState<SortKey>("case_id");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
 
   useEffect(() => {
-    fetchApi<PaginatedResponse<Readmission> | Readmission[]>("/api/readmissions?limit=200")
-      .then((res) => setRows(Array.isArray(res) ? res : res.items))
+    fetchApi<PaginatedResponse<MortalityCase>>("/api/mortality-cases?limit=200")
+      .then((res) => setRows(res.items))
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   }, []);
@@ -86,11 +86,7 @@ export default function ReadmissionsPage() {
 
   const stats = useMemo(() => {
     const reviewed = rows.filter((r) => r.review_status === "reviewed").length;
-    const avgDays =
-      rows.length > 0
-        ? (rows.reduce((sum, r) => sum + r.days_between, 0) / rows.length).toFixed(1)
-        : "0";
-    return { total: rows.length, reviewed, pending: rows.length - reviewed, avgDays };
+    return { total: rows.length, reviewed, pending: rows.length - reviewed };
   }, [rows]);
 
   const filtered = useMemo(() => {
@@ -98,9 +94,8 @@ export default function ReadmissionsPage() {
     const list = rows.filter((r) => {
       if (!q) return true;
       return (
-        String(r.readmission_id).includes(q) ||
-        r.index_diagnosis.toLowerCase().includes(q) ||
-        r.readmit_diagnosis.toLowerCase().includes(q) ||
+        String(r.case_id).includes(q) ||
+        r.diagnosis.toLowerCase().includes(q) ||
         (r.gender ?? "").toLowerCase().includes(q) ||
         (r.root_cause ?? "").toLowerCase().includes(q)
       );
@@ -125,33 +120,32 @@ export default function ReadmissionsPage() {
     return (
       <div className="py-16 text-center">
         <div className="inline-block h-6 w-6 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent" />
-        <p className="mt-3 text-sm text-[var(--muted)]">Loading readmissions...</p>
+        <p className="mt-3 text-sm text-[var(--muted)]">Loading mortality cases...</p>
       </div>
     );
 
   if (!rows.length)
     return (
       <>
-        <h1 className="text-2xl font-bold mb-6">Readmissions</h1>
-        <p className="text-[var(--muted)]">No readmissions found. Run the identify pipeline first.</p>
+        <h1 className="text-2xl font-bold mb-6">Mortality Cases</h1>
+        <p className="text-[var(--muted)]">No mortality cases found. Run the identify pipeline with --type mortality first.</p>
       </>
     );
 
   return (
     <>
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold">Readmissions</h1>
+        <h1 className="text-2xl font-bold">Mortality Cases</h1>
         <span className="text-sm text-[var(--muted)]">
-          {filtered.length} of {rows.length} readmissions
+          {filtered.length} of {rows.length} cases
         </span>
       </div>
 
       {/* Summary stats */}
-      <div className="grid grid-cols-4 gap-4 mb-6">
-        <StatCard label="Total Readmissions" value={stats.total} />
+      <div className="grid grid-cols-3 gap-4 mb-6">
+        <StatCard label="Total Cases" value={stats.total} />
         <StatCard label="Reviewed" value={stats.reviewed} />
         <StatCard label="Pending" value={stats.pending} />
-        <StatCard label="Avg Days Between" value={stats.avgDays} />
       </div>
 
       {/* Search */}
@@ -170,34 +164,30 @@ export default function ReadmissionsPage() {
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-[var(--border)] text-left text-xs text-[var(--muted)] uppercase tracking-wide">
-              <SortHeader label="ID" sortKey="readmission_id" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} />
+              <SortHeader label="ID" sortKey="case_id" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} />
               <SortHeader label="Age" sortKey="age" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} />
               <th className="px-4 py-3">Gender</th>
-              <SortHeader label="Index Diagnosis" sortKey="index_diagnosis" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} />
-              <SortHeader label="Index Date" sortKey="index_start" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} />
-              <SortHeader label="Days" sortKey="days_between" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} />
-              <SortHeader label="Readmit Reason" sortKey="readmit_diagnosis" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} />
+              <SortHeader label="Diagnosis" sortKey="diagnosis" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} />
+              <SortHeader label="Death Date" sortKey="death_date" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} />
+              <th className="px-4 py-3">Disposition</th>
               <SortHeader label="Status" sortKey="review_status" currentSort={sortKey} currentDir={sortDir} onSort={handleSort} />
             </tr>
           </thead>
           <tbody>
             {filtered.map((r) => (
-              <tr key={r.readmission_id} className="border-b border-[var(--border)] hover:bg-[var(--accent-light)]/50 transition-colors">
+              <tr key={r.case_id} className="border-b border-[var(--border)] hover:bg-[var(--accent-light)]/50 transition-colors">
                 <td className="px-4 py-3.5">
-                  <Link href={`/reviews/readmission/${r.readmission_id}`} className="text-[var(--accent)] hover:underline font-medium">
-                    #{r.readmission_id}
+                  <Link href={`/reviews/mortality/${r.case_id}`} className="text-[var(--accent)] hover:underline font-medium">
+                    #{r.case_id}
                   </Link>
                 </td>
-                <td className="px-4 py-3.5">{r.age ?? "—"}</td>
-                <td className="px-4 py-3.5">{r.gender ?? "—"}</td>
-                <td className="px-4 py-3.5 max-w-xs truncate" title={r.index_diagnosis}>
-                  {r.index_diagnosis}
+                <td className="px-4 py-3.5">{r.age ?? "\u2014"}</td>
+                <td className="px-4 py-3.5">{r.gender ?? "\u2014"}</td>
+                <td className="px-4 py-3.5 max-w-xs truncate" title={r.diagnosis}>
+                  {r.diagnosis}
                 </td>
-                <td className="px-4 py-3.5 text-[var(--muted)]">{r.index_start?.slice(0, 10) ?? "—"}</td>
-                <td className="px-4 py-3.5">{r.days_between}</td>
-                <td className="px-4 py-3.5 max-w-xs truncate" title={r.readmit_diagnosis}>
-                  {r.readmit_diagnosis}
-                </td>
+                <td className="px-4 py-3.5 text-[var(--muted)]">{r.death_date ?? "\u2014"}</td>
+                <td className="px-4 py-3.5 text-[var(--muted)]">{r.discharge_disposition ?? "\u2014"}</td>
                 <td className="px-4 py-3.5">
                   <StatusBadge reviewed={r.review_status === "reviewed"} />
                 </td>

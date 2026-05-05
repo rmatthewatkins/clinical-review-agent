@@ -36,12 +36,13 @@ const scoreColors = [
 
 function QuickLinks() {
   const links = [
-    { href: "/readmissions", label: "Readmissions", description: "View all readmission pairs" },
+    { href: "/readmissions", label: "Readmissions", description: "View all readmissions" },
+    { href: "/mortality", label: "Mortality", description: "View mortality cases" },
     { href: "/reviews", label: "Reviews", description: "Browse completed reviews" },
     { href: "/analytics", label: "Analytics", description: "Explore cohort analytics" },
   ];
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-10">
+    <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 mb-10">
       {links.map((link) => (
         <Link
           key={link.href}
@@ -79,10 +80,11 @@ export default function Dashboard() {
     <>
       <h1 className="text-2xl font-bold mb-6">Dashboard</h1>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-10">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 mb-10">
         <MetricCard label="Patients" value={data.patients} />
         <MetricCard label="Encounters" value={data.encounters} />
-        <MetricCard label="Readmission Pairs" value={data.pairs} />
+        <MetricCard label="Readmissions" value={data.readmissions} />
+        <MetricCard label="Mortality Cases" value={data.mortality_cases ?? 0} />
         <MetricCard label="Reviews Completed" value={data.reviews} />
       </div>
 

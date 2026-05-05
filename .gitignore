@@ -1,7 +1,12 @@
 .env
+.env.mimic
 __pycache__/
 *.pyc
 .venv/
 output/
 web/.next/
 web/node_modules/
+
+# Local PhysioNet/MIMIC artifacts — DUA forbids redistribution
+data/
+.DS_Store

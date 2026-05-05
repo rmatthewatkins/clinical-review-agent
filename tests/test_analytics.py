@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from src.schema import get_connection, SCHEMA_SQL, ALL_TABLES
-from src.analytics.analyze import (
+from clinical_review_agent.schema import get_connection, SCHEMA_SQL, ALL_TABLES
+from clinical_review_agent.analytics.analyze import (
     _fetch_reviews,
     root_cause_distribution,
     mean_preventability_by_diagnosis,
@@ -33,7 +33,7 @@ from src.analytics.analyze import (
 
 SYNTHETIC_REVIEWS = [
     {
-        "pair_id": 1,
+        "readmission_id": 1,
         "root_cause_category": "Medication non-adherence",
         "preventability_score": 4,
         "preventability_rationale": "Patient did not fill prescriptions.",
@@ -42,7 +42,7 @@ SYNTHETIC_REVIEWS = [
         "confidence_level": "high",
     },
     {
-        "pair_id": 2,
+        "readmission_id": 2,
         "root_cause_category": "Inadequate discharge planning",
         "preventability_score": 3,
         "preventability_rationale": "Discharge instructions were incomplete.",
@@ -51,7 +51,7 @@ SYNTHETIC_REVIEWS = [
         "confidence_level": "medium",
     },
     {
-        "pair_id": 3,
+        "readmission_id": 3,
         "root_cause_category": "Medication non-adherence",
         "preventability_score": 5,
         "preventability_rationale": "Multiple missed doses documented.",
@@ -60,7 +60,7 @@ SYNTHETIC_REVIEWS = [
         "confidence_level": "high",
     },
     {
-        "pair_id": 4,
+        "readmission_id": 4,
         "root_cause_category": "Disease progression",
         "preventability_score": 2,
         "preventability_rationale": "Natural disease progression despite treatment.",
@@ -69,7 +69,7 @@ SYNTHETIC_REVIEWS = [
         "confidence_level": "medium",
     },
     {
-        "pair_id": 5,
+        "readmission_id": 5,
         "root_cause_category": "Inadequate discharge planning",
         "preventability_score": 4,
         "preventability_rationale": "No outpatient appointment scheduled.",
@@ -78,7 +78,7 @@ SYNTHETIC_REVIEWS = [
         "confidence_level": "high",
     },
     {
-        "pair_id": 6,
+        "readmission_id": 6,
         "root_cause_category": "Medication non-adherence",
         "preventability_score": 3,
         "preventability_rationale": "Partial adherence noted.",
@@ -87,7 +87,7 @@ SYNTHETIC_REVIEWS = [
         "confidence_level": "low",
     },
     {
-        "pair_id": 7,
+        "readmission_id": 7,
         "root_cause_category": "Social determinants",
         "preventability_score": 1,
         "preventability_rationale": "Housing instability drove readmission.",
@@ -116,12 +116,12 @@ def _populate_db(conn) -> None:
         ("p1", "1950-01-01", "male"),
     )
 
-    # For each review, create encounters, readmission_pairs, conditions, and reviews
-    for i, (pair_id, diagnosis) in enumerate(DIAGNOSES, start=1):
-        index_enc_id = f"enc-index-{pair_id}"
-        readm_enc_id = f"enc-readm-{pair_id}"
+    # For each review, create encounters, readmissions, conditions, and reviews
+    for i, (readmission_id, diagnosis) in enumerate(DIAGNOSES, start=1):
+        index_enc_id = f"enc-index-{readmission_id}"
+        readm_enc_id = f"enc-readm-{readmission_id}"
 
-        # Encounters (ignore duplicates for same pair_id via ON CONFLICT)
+        # Encounters (ignore duplicates for same readmission_id via ON CONFLICT)
         conn.execute(
             """INSERT INTO encounters (id, patient_id, type, start, "end") """
             "VALUES (%s, 'p1', 'inpatient', '2025-01-01', '2025-01-05') ON CONFLICT DO NOTHING",
@@ -133,18 +133,18 @@ def _populate_db(conn) -> None:
             (readm_enc_id,),
         )
 
-        # Readmission pair
+        # Readmission
         conn.execute(
-            "INSERT INTO readmission_pairs (id, index_encounter_id, readmission_encounter_id, days_between, patient_id) "
+            "INSERT INTO readmissions (id, index_encounter_id, readmission_encounter_id, days_between, patient_id) "
             "VALUES (%s, %s, %s, 15, 'p1') ON CONFLICT DO NOTHING",
-            (pair_id, index_enc_id, readm_enc_id),
+            (readmission_id, index_enc_id, readm_enc_id),
         )
 
         # Condition on the index encounter
         conn.execute(
             "INSERT INTO conditions (id, patient_id, encounter_id, code, display, onset, clinical_status) "
             "VALUES (%s, 'p1', %s, %s, %s, '2025-01-01', 'active') ON CONFLICT DO NOTHING",
-            (f"cond-{pair_id}", index_enc_id, f"code-{pair_id}", diagnosis),
+            (f"cond-{readmission_id}", index_enc_id, f"code-{readmission_id}", diagnosis),
         )
 
         # Review
@@ -158,9 +158,9 @@ def _populate_db(conn) -> None:
             "confidence_level": review_data["confidence_level"],
         })
         conn.execute(
-            "INSERT INTO reviews (pair_id, structured_json, clinical_narrative, model_used, created_at, tokens_used) "
-            "VALUES (%s, %s, 'narrative', 'test-model', '2025-02-01', 100)",
-            (pair_id, structured),
+            "INSERT INTO reviews (case_type, case_id, readmission_id, structured_json, clinical_narrative, model_used, created_at, tokens_used) "
+            "VALUES (%s, %s, %s, %s, 'narrative', 'test-model', '2025-02-01', 100)",
+            ("readmission", readmission_id, readmission_id, structured),
         )
 
     conn.commit()

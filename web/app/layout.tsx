@@ -7,8 +7,8 @@ const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
 const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "Readmissions Review Agent",
-  description: "AI-powered clinical readmissions review dashboard",
+  title: "Clinical Review Agent",
+  description: "AI-powered clinical peer-review dashboard (readmissions, mortality)",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -18,7 +18,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <Nav />
         <main className="max-w-7xl mx-auto px-6 py-8 flex-1 w-full">{children}</main>
         <footer className="border-t border-[var(--border)] px-6 py-4 text-center text-sm text-[var(--muted)]">
-          Readmissions Review Agent &middot; Powered by Claude
+          Clinical Review Agent &middot; Powered by Claude
         </footer>
       </body>
     </html>

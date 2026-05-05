@@ -8,9 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from src.data.sources.base import FhirSource, code_display, extension_value, ref
-from src.data.sources.synthea_file import SyntheaFileSource
-from src.data.ingest import (
+from clinical_review_agent.data.sources.base import FhirSource, code_display, extension_value, ref
+from clinical_review_agent.data.sources.synthea_file import SyntheaFileSource
+from clinical_review_agent.data.ingest import (
     _parse_encounter,
     _parse_medication,
     _parse_observation,
