@@ -1,6 +1,6 @@
 # Clinical Review Agent
 
-An AI-powered clinical peer-review agent that ingests patient data from synthetic sources (Synthea), production FHIR R4 servers (Epic, HAPI), or MIMIC-III on BigQuery, then identifies and reviews specific case types — currently 30-day hospital readmissions and inpatient mortality. Uses Claude as a simulated hospitalist to perform structured peer reviews with root cause analysis, preventability scoring, and intervention recommendations.
+An AI-powered clinical peer-review agent that ingests patient data from synthetic sources (Synthea), production FHIR R4 servers (Epic, HAPI), or MIMIC-III / MIMIC-IV on BigQuery, then identifies and reviews specific case types — currently 30-day hospital readmissions, inpatient mortality, and AHRQ Patient Safety Indicators (PSIs). Uses Claude as a simulated hospitalist to perform structured peer reviews with root cause analysis, preventability scoring, and intervention recommendations. PSI review is specifically tuned to identify documentation and coding gaps — findings present in radiology or discharge narrative that were never coded into structured ICD diagnoses, which routinely cause AHRQ indicators to misclassify cases.
 
 ## Architecture
 
@@ -13,11 +13,18 @@ clinical_review_agent/           Python package
 │   ├── ingest.py                Source-agnostic resource parser → PostgreSQL
 │   ├── pairs.py                 30-day readmission identifier (planned-readmit + transfer filters)
 │   ├── mortality.py             Inpatient mortality identifier (death-disposition match)
+│   ├── psi.py                   AHRQ PSI engine (numerator/denominator/exclusion + POA inference)
+│   ├── psi_definitions/         Per-PSI rule subclasses (PSI 03, 06, 12 — prototype subset)
+│   │   ├── base.py              PsiDefinition base class
+│   │   ├── psi_03.py            Pressure Ulcer Rate (stage 3+, POA-critical)
+│   │   ├── psi_06.py            Iatrogenic Pneumothorax Rate
+│   │   └── psi_12.py            Perioperative Pulmonary Embolism / DVT Rate
 │   └── sources/
 │       ├── base.py              FhirSource protocol + shared FHIR parsing helpers
 │       ├── synthea_file.py      File-based source (Synthea Bundle JSONs)
 │       ├── fhir_api.py          FHIR R4 REST API client (Epic, HAPI, etc.)
-│       └── mimic_bq.py          MIMIC-III via BigQuery (physionet-data) → FHIR + Note dicts
+│       ├── mimic_bq.py          MIMIC-III via BigQuery (physionet-data) → FHIR + Note dicts
+│       └── mimic_iv_bq.py       MIMIC-IV via BigQuery (physionet-data.mimiciv_*) → FHIR + Note dicts
 ├── agent/
 │   ├── context.py               Clinical context assembler (per case type)
 │   └── reviewer.py              Anthropic API call + structured peer review
@@ -40,10 +47,10 @@ web/                             Next.js + TypeScript + Tailwind frontend (port 
 ### Pipeline
 
 ```
-Source (Synthea | FHIR R4 API | MIMIC-III BigQuery)
+Source (Synthea | FHIR R4 API | MIMIC-III BigQuery | MIMIC-IV BigQuery)
    ↓ ingest      (parse + load to PostgreSQL)
-   ↓ identify    (readmission pairs OR mortality cases)
-   ↓ review      (Claude assembles context, scores, narrates)
+   ↓ identify    (readmission pairs OR mortality cases OR PSI candidates)
+   ↓ review      (Claude assembles context, scores, narrates, surfaces coding gaps)
    ↓ analyze     (cohort metrics + charts)
 ```
 
@@ -56,7 +63,7 @@ The `FhirSource` protocol (`iter_resources() -> Iterator[dict]`) lets every down
 - A PostgreSQL instance (Railway hosted, or local — `DATABASE_URL` env var)
 - An Anthropic API key (`ANTHROPIC_API_KEY` env var)
 - For Synthea source: Java (to run Synthea)
-- For MIMIC-III source: a GCP project with BigQuery enabled, `gcloud auth application-default login` set up, and PhysioNet credentialed access to MIMIC-III
+- For MIMIC-III / MIMIC-IV sources: a GCP project with BigQuery enabled, `gcloud auth application-default login` set up, and PhysioNet credentialed access to the dataset(s) you want to query (granted per-version, not shared)
 
 ## Setup
 
@@ -106,7 +113,18 @@ Reads directly from `physionet-data.mimiciii_clinical` and `physionet-data.mimic
 
 Requires `BQ_PROJECT_ID` env var pointing at a GCP project that can be billed for queries (the dataset itself is public; the project handles billing). Note: if your global ADC has a `quota_project_id` set to a different project the active account can't bill, you'll get `USER_PROJECT_DENIED`. The source overrides this programmatically — see `clinical_review_agent/data/sources/mimic_bq.py`.
 
-**DUA notice:** MIMIC-III is restricted under the PhysioNet Credentialed Health Data Use Agreement v1.5. Single credentialed user only; no public deployment of MIMIC-loaded systems; outputs (`output/reviews/*`) are also restricted data. Use a dedicated Postgres database for MIMIC ingest — don't co-mingle with Synthea data.
+### D. MIMIC-IV via BigQuery
+
+Reads from `physionet-data.mimiciv_3_1_hosp` (versioned by AHRQ release) and `physionet-data.mimiciv_note` for clinical narrative. The source mirrors MIMIC-III's behavior with these adaptations: synthesized `birthDate` from `anchor_year - anchor_age` (MIMIC-IV publishes no DOB), per-row `icd_version` (9 or 10) selecting the right FHIR coding system, MD5-hashed prescription ids (no `row_id` in MIMIC-IV `prescriptions`), and `discharge.note_type = "DS"` mapped to category `"Discharge summary"` so the existing key-note filter picks it up. Add `--include-radiology` to also pull `mimiciv_note.radiology` reports — required if you plan to run the PSI agent (which reads radiology to spot uncoded findings).
+
+```bash
+python main.py ingest --mimic-iv-bq --bq-project mimic-iii-exploration \
+  --cohort-size 25 --include-radiology
+```
+
+Use `--mimic-iv-version 3_1` (default) or `--mimic-iv-version 2_2` to pin a different release. Resource ids are namespaced `m4-p<subject_id>`, `m4-a<hadm_id>`, `m4-note-<note_id>`, etc., so MIMIC-III and MIMIC-IV can coexist in one Postgres without collision (though the DUA still recommends separate databases).
+
+**DUA notice:** MIMIC-III and MIMIC-IV are both restricted under the PhysioNet Credentialed Health Data Use Agreement v1.5. Single credentialed user only; no public deployment of MIMIC-loaded systems; outputs (`output/reviews/*`) are also restricted data. Use a dedicated Postgres database for MIMIC ingest — don't co-mingle with Synthea data. PhysioNet grants BigQuery access per dataset; having MIMIC-III access does not imply MIMIC-IV access (and the unversioned aliases like `mimiciv_hosp` may require a separate grant from the versioned `mimiciv_3_1_hosp`).
 
 ## Usage
 
@@ -145,6 +163,7 @@ python main.py ingest --mimic-bq --cohort-size 100 --only Note
 ```bash
 python main.py identify                       # readmissions (default)
 python main.py identify --type mortality      # inpatient mortality
+python main.py identify --type psi            # AHRQ Patient Safety Indicators
 ```
 
 **Readmissions:** finds inpatient encounters followed by another inpatient encounter for the same patient within `READMISSION_WINDOW_DAYS` (default 30). Filters out:
@@ -155,7 +174,11 @@ python main.py identify --type mortality      # inpatient mortality
 
 **Mortality:** finds inpatient encounters with discharge dispositions matching `expired`, `died`, `death`, `deceased`. Each case stores a configurable lookback window (`MORTALITY_LOOKBACK_DAYS`, default 90 days) used by the context builder to summarize prior care.
 
-Both commands are idempotent — they DELETE existing rows of their case type and re-identify.
+**PSI:** runs each registered AHRQ Patient Safety Indicator over every inpatient encounter. A row is written to `psi_cases` for each encounter where the PSI's numerator fires, regardless of whether the denominator/exclusion logic kept the case — exclusion reasons are recorded on the row so the review agent can decide whether the engine got it right (e.g. an excluded case might still be a true PSI hit if the exclusion code was an artifact, and a numerator hit might not be a real event if a *missing* exclusion would have removed it). Currently registered: PSI 03 (Pressure Ulcer), PSI 06 (Iatrogenic Pneumothorax), PSI 12 (Perioperative VTE) — each per AHRQ QI v2024 (curated subsets, not exhaustive code lists). Adding a new PSI is one new file in `psi_definitions/` plus one line in `REGISTRY`.
+
+**POA strategy:** MIMIC-IV does not carry present-on-admission flags. Each PSI infers POA via prior-admission lookback — if the same code appeared on a strictly earlier admission for the patient, the condition is treated as POA-likely. The engine records `poa_imputation` (`prior_admission_lookback` / `assumed_not_poa`) and `poa_confidence` (`high` / `medium` / `low`) on each `psi_cases` row. The review agent treats this as a hypothesis and overrides it from the discharge / radiology narrative when there's better evidence.
+
+All three commands are idempotent — they DELETE existing rows of their case type and re-identify.
 
 ### 3. Review
 
@@ -166,6 +189,9 @@ python main.py review                             # review all unreviewed readmi
 
 python main.py review --type mortality --dry-run  # preview a mortality context
 python main.py review --type mortality --limit 5  # review 5 mortality cases
+
+python main.py review --type psi --dry-run        # preview a PSI context
+python main.py review --type psi --limit 5        # review 5 PSI candidates
 ```
 
 Each review produces:
@@ -176,10 +202,13 @@ Outputs land in PostgreSQL (`reviews` table, upsert keyed on `(case_type, case_i
 
 The clinical context payload includes:
 - `patient_baseline` (demographics, chronic conditions, baseline meds, recent observations)
-- The case-type-specific encounter (`index_admission` + `interval_care` + `readmission` for readmits; `death_encounter` + `prior_care` for mortality)
-- For each encounter, **`key_notes`** (full text of discharge summaries + admission H&P notes when present) and **`notes_index`** (metadata-only list of all other notes for that encounter — category, description, date)
+- The case-type-specific encounter:
+  - **Readmission** — `index_admission` + `interval_care` + `readmission`
+  - **Mortality** — `death_encounter` + `prior_care`
+  - **PSI** — `psi` (engine verdict + POA imputation) + `encounter` + `prior_encounters`
+- For each encounter, **`key_notes`** (full text of discharge summaries + admission H&P notes; PSI review additionally pulls every radiology report) and **`notes_index`** (metadata-only list of all other notes for that encounter — category, description, date)
 
-The system prompt explicitly instructs Claude to read `key_notes` first and to use `notes_index` to flag missing documentation rather than invent narrative.
+The system prompt explicitly instructs Claude to read `key_notes` first and to use `notes_index` to flag missing documentation rather than invent narrative. The PSI prompt adds explicit instructions to compare coded diagnoses against radiology / discharge narrative and emit `missing_codes[]` (with suggested ICD-10, evidence quote, source-note citation) for findings that should have been coded — the canonical "documentation/coding gap" finding that flips a PSI false-positive into a real CDI opportunity.
 
 ### 4. Analyze
 
@@ -217,7 +246,7 @@ Pages:
 
 ## Database schema
 
-10 tables (`clinical_review_agent/schema.py`):
+11 tables (`clinical_review_agent/schema.py`):
 
 | Table | Purpose |
 |---|---|
@@ -231,7 +260,8 @@ Pages:
 | `notes` | free-text narrative (category, description, chartdate, charttime, full text) — MIMIC-only at present |
 | `readmissions` | identified index → readmission encounter pairs with `days_between` |
 | `mortality_cases` | identified inpatient deaths with `death_date` and `lookback_days` |
-| `reviews` | AI assessments, polymorphic via `(case_type, case_id)` unique index |
+| `psi_cases` | identified AHRQ PSI candidates: `psi_number`, numerator/denominator verdicts, exclusion reasons, POA imputation method + confidence |
+| `reviews` | AI assessments, polymorphic via `(case_type, case_id)` unique index — supports `readmission`, `mortality`, `psi` |
 
 `SCHEMA_SQL` is idempotent (`CREATE TABLE IF NOT EXISTS`); `MIGRATION_SQL` upgrades older deployments (renames `readmission_pairs → readmissions`, adds `case_type`/`case_id` to `reviews`, etc.) and is safe on fresh databases.
 
@@ -253,7 +283,20 @@ Pages:
 | `preventability_score` | 1–5 (same anchors) |
 | `confidence_level` | `high`, `moderate`, `low` |
 
-Both share the prose-narrative output and the `contributing_factors` / `recommended_interventions` arrays.
+Readmission and mortality share the prose-narrative output and the `contributing_factors` / `recommended_interventions` arrays.
+
+### PSI (Patient Safety Indicator)
+
+| Field | Values |
+|---|---|
+| `root_cause_category` | `coding_gap`, `documentation_gap`, `poa_misclassification`, `true_event_preventable`, `true_event_unavoidable`, `engine_error`, `other` |
+| `case_classification` | `true_positive`, `false_positive_coding`, `false_positive_documentation`, `false_positive_poa`, `false_positive_logic`, `insufficient_data` |
+| `missing_codes[]` | Each: `code` (suggested ICD-10), `display`, `evidence` (quote), `source_note` |
+| `documentation_opportunities[]` | Findings only present in non-codeable sources — CDI engagement candidates |
+| `poa_assessment` | `agent_inference` (`poa` / `not_poa` / `unable_to_determine`), `confidence`, `rationale` |
+| `preventability_score` | 1–5 (only meaningful for `true_event_*`; `1` for false positives) |
+| `recommended_actions[]` | Concrete next steps for coding / CDI / quality / engine teams |
+| `confidence_level` | `high`, `moderate`, `low` |
 
 ## Testing
 
